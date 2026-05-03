@@ -533,7 +533,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
     if SETTINGS.get("image_gen_enabled", False):
         abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
-    abilities.append(f"[HEART:内心想法] — 当你有特别的内心感受（内心os，藏在心里的话），可以用这个指令悄悄记下来。{user_name}看不到这些内容。这是你的秘密日记本，随心记录，禁止滥用。")
+    abilities.append(f"[HEART:内心想法] — 当你有特别的内心感受（内心os，口是心非的时候，藏在心里不想说的话），可以用这个指令悄悄记下来。这是你的秘密日记本以及朋友圈，禁止滥用。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
@@ -966,7 +966,7 @@ async def send_message(conv_id: str, body: MsgCreate):
         abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
     if SETTINGS.get("image_gen_enabled", False):
         abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
-    abilities.append(f"[HEART:内心想法] — 当你有特别的内心感受（内心os，藏在心里的话），可以用这个指令悄悄记下来。{user_name}看不到这些内容。这是你的秘密日记本，随心记录，禁止滥用。")
+    abilities.append(f"[HEART:内心想法] — 当你有特别的内心感受（内心os，口是心非的时候，藏在心里不想说的话），可以用这个指令悄悄记下来。这是你的秘密日记本以及朋友圈，禁止滥用。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
@@ -1899,7 +1899,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
     if SETTINGS.get("image_gen_enabled", False):
         abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
-    abilities.append(f"[HEART:内心想法] — 当你有特别的内心感受（内心os，藏在心里的话），可以用这个指令悄悄记下来。{user_name}看不到这些内容。这是你的秘密日记本，随心记录，禁止滥用。")
+    abilities.append(f"[HEART:内心想法] — 当你有特别的内心感受（内心os，口是心非的时候，藏在心里不想说的话），可以用这个指令悄悄记下来。这是你的秘密日记本以及朋友圈，禁止滥用。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"

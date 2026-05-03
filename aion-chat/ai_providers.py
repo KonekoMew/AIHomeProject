@@ -102,11 +102,19 @@ async def call_siliconflow(messages: list, model: str, meta: dict | None = None,
                         pass
 
 
+# ── Gemini 安全设置（全局关闭内容过滤）─────────────
+GEMINI_SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
 # ── Gemini ────────────────────────────────────────
 async def call_gemini(messages: list, model: str, meta: dict | None = None, temperature: float | None = None, max_tokens: int | None = None):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse&key={get_key('gemini')}"
     contents = build_gemini_contents(messages)
-    payload = {"contents": contents}
+    payload = {"contents": contents, "safetySettings": GEMINI_SAFETY_SETTINGS}
     gen_config = {}
     if temperature is not None:
         gen_config["temperature"] = temperature

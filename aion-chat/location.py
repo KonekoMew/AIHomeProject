@@ -704,7 +704,12 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
     sentinel_model = "gemini-3.1-flash-lite-preview"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{sentinel_model}:generateContent?key={gemini_key}"
     contents = [{"role": "user", "parts": [{"text": prompt}]}]
-    payload = {"contents": contents}
+    payload = {"contents": contents, "safetySettings": [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]}
 
     monitoring_log = event_desc
     call_core = False

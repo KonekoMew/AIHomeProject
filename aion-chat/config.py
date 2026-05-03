@@ -135,6 +135,8 @@ DEFAULT_MODEL = "gemini-3-flash"
 # ── 摄像头默认配置 ───────────────────────────────
 DEFAULT_CAM_CFG = {
     "camera_index": 0,
+    "active_source": "local",
+    "esp32_cam_url": "",
     "auto_interval_min": 10,
     "auto_interval_max": 20,
     "max_screenshots": 200,

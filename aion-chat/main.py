@@ -38,6 +38,7 @@ from routes import theater as theater_routes
 from routes import ghost_forest as ghost_forest_routes
 from routes import gift as gift_routes
 from routes import fund as fund_routes
+from routes import wallpaper as wallpaper_routes
 from activity import pc_tracker
 from memory import auto_digest
 from fund import fund_scheduler
@@ -79,7 +80,10 @@ async def lifespan(app: FastAPI):
     cam.set_event_loop(loop)
     cam_cfg = load_cam_config()
     if cam_cfg.get("monitor_enabled"):
-        cam.open_camera(cam_cfg["camera_index"])
+        if cam_cfg.get("active_source") == "esp32":
+            cam.open_esp32()
+        else:
+            cam.open_camera(cam_cfg["camera_index"])
         cam.start_monitoring()
     # 语音模块初始化
     voice.set_event_loop(loop)
@@ -145,6 +149,7 @@ app.include_router(theater_routes.router)
 app.include_router(ghost_forest_routes.router)
 app.include_router(gift_routes.router)
 app.include_router(fund_routes.router)
+app.include_router(wallpaper_routes.router)
 
 
 # 页面
@@ -211,6 +216,10 @@ async def gift_page():
 @app.get("/fund")
 async def fund_page():
     return FileResponse(BASE_DIR / "static" / "fund.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+@app.get("/wallpaper")
+async def wallpaper_page():
+    return FileResponse(BASE_DIR / "static" / "wallpaper.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 # PWA：Service Worker 必须从根路径提供，作用域才能覆盖所有页面
 @app.get("/sw.js")

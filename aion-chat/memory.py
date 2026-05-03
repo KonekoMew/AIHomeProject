@@ -282,10 +282,16 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
     model = "gemini-3.1-flash-lite-preview"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
     contents = [{"role": "user", "parts": [{"text": prompt}]}]
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json={"contents": contents})
+            resp = await client.post(url, json={"contents": contents, "safetySettings": safety_settings})
             resp.raise_for_status()
             data = resp.json()
             raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -357,9 +363,15 @@ async def _call_flash_lite(prompt: str) -> dict | None:
     model = "gemini-3.1-flash-lite-preview"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
     contents = [{"role": "user", "parts": [{"text": prompt}]}]
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json={"contents": contents})
+            resp = await client.post(url, json={"contents": contents, "safetySettings": safety_settings})
             resp.raise_for_status()
             data = resp.json()
             raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()

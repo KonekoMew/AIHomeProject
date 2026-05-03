@@ -6,7 +6,7 @@
 ## 技术栈
 - **后端**：Python FastAPI + SQLite (aiosqlite) + WebSocket
 - **前端**：多页面架构（原生 JS，无框架），暖光主题，手机/PC 自适应。chat.html 为主聊天页，独立功能页通过 common.css/common.js 共享样式和工具函数
-- **摄像头**：OpenCV (`cv2`) DirectShow 后端后台线程采集
+- **摄像头**：OpenCV (`cv2`) DirectShow 后端后台线程采集 + ESP32-CAM HTTP 远程抓帧（双摄切换 + App 桥接模式）
 - **语音**：WebRTC VAD 语音检测 + 硬基流动 ASR (SenseVoiceSmall) + TTS (CosyVoice2) + 语音消息（按住录制）
 - **AI 接口**：硬基流动（OpenAI 兼容）、Google Gemini（REST API）、AiPro 中转站（OpenAI 兼容）
 - **AI 生图**：Gemini `gemini-3.1-flash-image-preview`（REST API generateContent，responseModalities=["IMAGE"]）
@@ -33,6 +33,7 @@
 │   ├── UserIcon.png              # 用户聊天头像
 │   ├── AIIcon.png                # AI 聊天头像
 │   └── 生图锚点.jpg             # SELFIE 参考图（AI 人物一致性锚点）
+│   └── wallpaper/                # 动态壁纸媒体文件（图片+视频）
 ├── AionApp/                      # Android WebView 原生壳（Java，Android Studio 项目）
 │   ├── app/src/main/java/com/aion/chat/
 │   │   ├── LauncherActivity.java # 启动页：双地址选择（家庭WiFi / Tailscale）+ 记住选择 + 启动推送服务
@@ -41,11 +42,12 @@
 │   │   ├── CameraBridge.java     # 原生摄像头桥：legacy Camera API → NV21 字节旋转 → JPEG → JS 轮询（绕过 WebView HTTPS 限制），录制时转发帧给 VideoBridge
 │   │   ├── VideoBridge.java      # 原生视频录制桥：MediaCodec(H.264) + MediaCodec(AAC) + MediaMuxer → MP4，复用 CameraBridge/AudioBridge 的帧数据
 │   │   ├── (AionImageSaver)      # 图片保存桥（WebViewActivity 内匿名类）：JS base64 → MediaStore 写入相册
-│   │   └── AionPushService.java  # 前台推送服务：独立 WebSocket 长连接 + 通知弹窗 + 断线重连 + WakeLock/WifiLock 保活
+│   │   └── AionPushService.java  # 前台推送服务：独立 WebSocket 长连接 + 通知弹窗 + 断线重连 + WakeLock/WifiLock 保活 + ESP32-CAM 桥接（拉帧→上传服务器）
 │   └── build.gradle              # compileSdk 34, minSdk 24, Gradle 8.5 + AGP 8.2.2, OkHttp 4.12.0
 ├── LittleToy/                    # BLE 玩具逆向分析 & 独立 demo
 │   ├── toy_control_v4.html       # 独立 BLE 控制页面（可单独使用）
 │   └── 逆向分析笔记.md           # SOSEXY 设备协议逆向笔记
+├── 启动壁纸.bat                  # Chrome App 模式无边框全屏启动动态壁纸
 └── aion-chat/
     ├── main.py                   # 入口：lifespan、路由注册、静态挂载、WebSocket、PWA 路由、自动记忆总结定时任务
     ├── config.py                 # 全局路径、常量、settings/worldbook/chat_status/cam_config 读写
@@ -53,7 +55,7 @@
     ├── ws.py                     # WebSocket ConnectionManager 单例，含 tts_clients 状态追踪 + _tts_fallback HTTP 回落机制 + client_id 注册/定向推送
     ├── ai_providers.py           # AI 调用：硅基流动/Gemini/AiPro中转站 流式 + 非流式 + 多模态消息构建
     ├── memory.py                 # 向量记忆：embedding、综合评分召回、手动/自动总结、即时哨兵(RAG路由)、原文追溯
-    ├── camera.py                 # 摄像头：CameraMonitor 类、Sentinel 分析（注入设备活动摘要）、Core 唤醒、[CAM_CHECK]
+    ├── camera.py                 # 摄像头：CameraMonitor 类、Sentinel 分析（注入设备活动摘要）、Core 唤醒、[CAM_CHECK]、ESP32-CAM 双摄切换+App桥接
     ├── location.py               # 高德地图定位：GPS心跳处理、三级研判、状态机(at_home/outside)、哨兵通知、POI搜索
     ├── voice.py                  # 语音唤醒 + 半双工通话（WebRTC VAD + 硬基流动 ASR），通话中自动携带 TTS 参数
     ├── tts.py                    # 服务端流式 TTS：按句切分（100-200字）+ 异步并行合成 + WebSocket/SSE 推送音频分片
@@ -62,6 +64,7 @@
     ├── gift.py                    # 礼物系统：AI 判断送礼 + 硅基流动 Kolors 生图 + 礼物数据 CRUD
     ├── fund.py                    # 基金持仓监控：akshare数据拉取、盈亏计算、上证指数、历史走势、AI分析prompt生成、每日14:45定时任务(FundScheduler)
     ├── book.py                    # EPUB 解析模块：书籍导入、章节拆分、段落标注、图片提取
+    ├── image_gen.py               # AI 生图模块：Gemini 图片生成（SELFIE/DRAW 模式）
     ├── routes/
     │   ├── __init__.py
     │   ├── book.py               # 阅读功能 API：书籍上传/列表/章节/进度/删除/图片/AI批注（单段+全章SSE）
@@ -69,7 +72,7 @@
     ├── chat.py               # 对话/消息 CRUD、send_message(SSE)、regenerate、cam-check-trigger、[MUSIC:xxx]/[ALARM:...]/[REMINDER:...]/[Monitor:...]/[TOY:x]/[查看动态:n]/[视频电话] 检测
     │   ├── music.py              # 音乐搜索/详情/播放/代理推流 API（pyncm）
     │   ├── schedule.py           # 日程 CRUD API（列表/添加/删除）
-    │   ├── cam.py                # 摄像头控制 + 监控日志 API
+    │   ├── cam.py                # 摄像头控制 + 监控日志 API + ESP32-CAM 画面源切换/桥接帧接收
     │   ├── location.py           # 定位 API：心跳上报、状态查询、POI搜索、配置管理、设置家位置
     │   ├── files.py              # 上传、聊天记录文件导出/管理
     │   ├── settings.py           # 设置、世界书、模型列表、TTS 代理、视频通话开关、AI生图开关
@@ -79,7 +82,8 @@
     │   ├── voice.py              # 语音唤醒/通话控制 API
     │   ├── ghost_forest.py       # 奥罗斯幽林 TRPG API（16 个端点：人设/会话/剧情生成/选择/骰子/大结局）+ SSE 流式 TTS
     │   ├── gift.py               # 礼物系统 API（pending/receive/list/delete/test）
-    │   └── fund.py               # 基金监控 API：持仓CRUD、配置开关、数据拉取、手动触发AI分析、缓存读取、历史走势
+    │   ├── fund.py               # 基金监控 API：持仓CRUD、配置开关、数据拉取、手动触发AI分析、缓存读取、历史走势
+    │   └── wallpaper.py          # 动态壁纸 API：文件列表/配置读写/上传/删除
     ├── activity.py               # 设备活动日志：JSONL 存储、自动清理（保留最近 3 小时）、PC 前台窗口采集（win32gui+psutil）、App 包名→中文名映射、10分钟窗口摘要（时长权重+carry-forward状态追溯）、AI联动开关+Prompt摘要生成
     ├── music.py                  # pyncm 封装层（搜索/歌曲详情/音频URL/MUSIC_U Cookie 登录/匿名登录）
     ├── README.md                 # 本文件
@@ -103,6 +107,7 @@
     │   ├── ghost-forest.html     # 奥罗斯幽林页 → /ghost-forest（TRPG 游戏：D20 骰子+角色扮演+AI DM）
     │   ├── gift.html              # 爱的印记页 → /gift（礼物陈列馆，缩略图网格+详情弹窗）
     │   ├── fund.html              # 奥罗斯财团页 → /fund（基金持仓监控、数据拉取、AI分析、持仓管理）
+    │   ├── wallpaper.html         # 动态壁纸页 → /wallpaper（全屏壁纸轮播+AI气泡，独立显示器使用）
     │   ├── video-call.js         # 视频通话模块：摄像头预览 + 按住录制视频 + ASR转写 + 来电/去电 UI
     │   ├── manifest.json         # PWA Web App Manifest（从 /manifest.json 提供）
     │   └── sw.js                 # PWA Service Worker（从 /sw.js 提供）
@@ -110,7 +115,7 @@
         ├── chat.db               # SQLite 数据库
         ├── settings.json         # API Key 持久化
         ├── worldbook.json        # 世界书（AI/用户人设+名称）
-        ├── cam_config.json       # 摄像头监控配置
+        ├── cam_config.json       # 摄像头监控配置（active_source/esp32_cam_url/本地摄像头/定时/静默时段）
         ├── chat_status.json      # 聊天状态摘要（供哨兵参考）
         ├── location_config.json  # 定位配置（高德Key、家坐标、开关、安静时段、阈值等）
         ├── location_status.json  # 定位状态缓存（当前坐标、状态、地址、天气、POI等）
@@ -124,6 +129,7 @@
         ├── theater_personas.json # 小剧场角色预设（多套人设，JSON数组）
         ├── fund_config.json      # 基金监控配置（开关、投资倾向）
         ├── fund_cache.json       # 基金数据缓存（最近一次拉取结果）
+        ├── wallpaper_config.json  # 动态壁纸配置（轮换间隔、文件启用状态、气泡锚点坐标）
         └── ghost_forest/          # 奥罗斯幽林 TRPG 数据
             ├── _personas.json     # DM/玩家人设预设
             └── {uuid}.json        # 游戏会话存档（每局一个文件）
@@ -148,6 +154,7 @@
 | `/ghost-forest` | ghost-forest.html 奥罗斯幽林页（TRPG 冒险游戏） |
 | `/gift` | gift.html 爱的印记页（礼物陈列馆） |
 | `/fund` | fund.html 奥罗斯财团页（基金持仓监控） |
+| `/wallpaper` | wallpaper.html 动态壁纸页（全屏壁纸轮播+AI气泡） |
 | `/manifest.json` | PWA Web App Manifest |
 | `/sw.js` | PWA Service Worker（根路径提供，作用域覆盖全站） |
 | `/public/*` | 公共资源 |
@@ -226,6 +233,10 @@
 
 ### 摄像头智能监控（Sentinel/Core 双脑架构）
 28. **摄像头集成** — OpenCV DirectShow 后端，支持多摄像头切换，绿屏检测，智能预热验证
+28a. **ESP32-CAM 双摄** — 支持 ESP32-CAM 作为备选摄像头源，前端 tab 切换本地/ESP32，地址支持 IP 或 mDNS 名称（如 `espcam.local`）
+28b. **自动桥接** — 服务器直连 ESP32 失败时，自动通知 App（AionPushService）启动桥接：App 从热点局域网拉帧→上传服务器。直连恢复时自动关闭桥接
+28c. **户外模式** — 手机开热点 + ESP32 连热点，App 前台服务桥接帧数据到家里服务器（~1fps，约 80KB/帧），AI 仍可触发 Sentinel/[CAM_CHECK]/定时监控
+28d. **零侵入** — 所有下游（Sentinel、Core、[CAM_CHECK]、定时监控、预览）通过 `get_frame_jpeg()` 取帧，无需感知帧来源。`active_source` 默认 `local`，不配置 ESP32 时行为完全不变
 29. **Sentinel 哨兵** — 定时截图后由轻量模型（flash-lite）分析，注入设备活动摘要（近 60 分钟 6 条）作为辅助判断依据，输出结构化 JSON（含概况摘要 summary + 唤醒原因 core_reason）
 30. **Core 唤醒** — Sentinel 判断需要时唤醒 Core（当前聊天模型），Core 收到哨兵摘要+唤醒原因+最近5条日志+记忆召回，主动在对话中联系用户
 31. **监控日志系统** — 独立于聊天的 JSONL 日志，按日期存储，3 天自动清理
@@ -1550,6 +1561,45 @@ python main.py
    - 点击「密语时刻」→ 关闭浮层 + 调用 `window.parent.openWhisper()`
 
 **涉及文件**：`routes/chat.py`（后端核心）、`static/chat.html`（前端浮层 + 导航改造）、`static/home.html`（iframe 适配）
+
+### 动态壁纸（独立显示器全屏壁纸 + AI 气泡）
+500. **全屏壁纸轮播** — 独立页面 `/wallpaper`，用于副屏全屏展示。支持图片和视频轮播，可配置轮换间隔（秒），视频播放完毕后自动切换下一个。全屏铺满（`object-fit: cover`），无黑边
+501. **淡入淡出过渡** — 双缓冲架构（两个媒体层交替），切换时新层在旧层上方 1.5 秒淡入，旧层在过渡完成后移除，确保无黑屏闪烁
+502. **资源就绪检测** — 图片通过轮询 `img.complete` + `naturalWidth`、视频通过轮询 `readyState >= 2` 确认资源就绪后再激活淡入，避免黑屏。保底超时（图片 2 秒 / 视频 3 秒）确保不会永远卡住
+503. **键盘操控** — `←` / `→` 方向键手动切换上/下一张壁纸，`F` 键切换全屏，`ESC` 退出全屏或锚点编辑模式。600ms 冷却保护防止快速按键导致黑屏
+504. **AI 聊天气泡** — 通过 WebSocket 接收 `msg_created` 事件，筛选 `role=assistant` 的消息，以半透明毛玻璃气泡显示在画面上。自动清洗 `[MUSIC:...]`、`[ALARM:...]`、`[REMINDER:...]`、`[Monitor:...]`、`[TOY:...]` 等指令标记和 Markdown 格式符号。气泡按 `\n\n` 自动拆分为多条，淡入显示，可配置自动消失时长（默认 12 秒）
+505. **气泡锚点系统** — 每张壁纸可独立设置气泡显示位置（百分比坐标），适应不同图片的人物位置。设置面板点击「编辑当前锚点」进入编辑模式，点击画面设定锚点位置，ESC 或右键退出
+506. **设置面板** — 鼠标移到屏幕底部边缘或双击打开设置面板，可配置：轮换间隔、气泡显示时长、启用/禁用单个壁纸文件、上传新壁纸、编辑气泡锚点。点击缩略图切换启用/禁用，右键缩略图跳转到该壁纸
+507. **Chrome App 模式启动** — `启动壁纸.bat` 使用 `chrome.exe --app=... --start-fullscreen` 启动，无地址栏/标签栏/边框，等同于独立桌面程序。关闭壁纸窗口不影响服务器和聊天
+508. **配置持久化** — 壁纸配置（轮换间隔、文件启用状态、气泡锚点坐标）存储在 `data/wallpaper_config.json`
+509. **完全独立** — 壁纸页面独立运行，与聊天系统仅通过 WebSocket 单向接收消息，开关壁纸不影响任何其他功能
+
+### 动态壁纸工作流程
+```
+【启动壁纸】
+  双击 启动壁纸.bat → Chrome --app 模式全屏打开 /wallpaper
+  → 加载 wallpaper_config.json + 扫描 public/wallpaper/ 目录
+  → 构建播放列表（排除 enabled=false 的文件）
+  → 显示第一张壁纸 → 启动轮换定时器 → 连接 WebSocket
+
+【壁纸轮播】
+  定时器到期（图片）/ 视频播放结束 → 切换下一个：
+    ├ 新层加载资源 → 轮询就绪状态（img.complete / video.readyState ≥ 2）
+    ├ 就绪后激活淡入（opacity 0→1，1.5 秒 CSS transition）
+    ├ 旧层 1.6 秒后隐藏并清理 DOM
+    └ 更新气泡锚点位置
+
+【AI 气泡显示】
+  WebSocket 收到 {type: "msg_created", data: {role: "assistant", content: "..."}}
+  → cleanAIText() 清洗指令标记和 Markdown 格式
+  → 按 \n\n 拆分为多条 → 逐条创建气泡 DOM（最多 5 条）
+  → 气泡淡入显示 → N 秒后自动淡出消失
+
+【锚点编辑】
+  设置面板 → 编辑当前锚点 → 进入编辑模式（crosshair 光标）
+  → 点击画面任意位置 → 保存百分比坐标到 config.files[name].bubble_anchor
+  → 实时更新气泡容器位置 → ESC/右键退出编辑模式
+```
 
 ## 注意事项
 - 搬迁目录后需修改 `一键启动.bat` 中的路径（第11行 `cd /d` 后面的绝对路径）

@@ -51,7 +51,13 @@ async def generate_image(prompt: str, is_selfie: bool = False) -> str | None:
         "contents": [{"parts": parts}],
         "generationConfig": {
             "responseModalities": ["IMAGE", "TEXT"],
-        }
+        },
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
     }
 
     try:

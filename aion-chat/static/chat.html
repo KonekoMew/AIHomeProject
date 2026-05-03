@@ -1115,6 +1115,7 @@ let systemLogs = [];    // 系统日志（会话级，刷新清空）
 let msgMusicCards = {}; // { msgId: [{ id, name, artist, album, cover, audio_url, candidates }] }
 let hasMoreMessages = false;   // 是否还有更早的消息可加载
 let loadingMore = false;       // 防止重复加载
+let _suppressScrollBottom = false; // 星标跳转时抑制自动滚底
 const MSG_PAGE_SIZE = 50;
 const $ = id => document.getElementById(id);
 
@@ -2345,6 +2346,7 @@ function renderMessages() {
 }
 
 function scrollBottom() {
+  if (_suppressScrollBottom) return;
   const el = $("messages");
   requestAnimationFrame(() => el.scrollTop = el.scrollHeight);
 }
@@ -2625,20 +2627,21 @@ async function unstarFromPanel(msgId) {
 
 async function jumpToStarredMsg(convId, msgId) {
   closeStarredPanel();
-  // 如果不在当前对话，先切换
-  if (currentConvId !== convId) {
-    await selectConv(convId);
-  }
-  // 检查消息是否已在当前加载的列表中
-  const existing = document.getElementById('m_' + msgId);
-  if (existing) {
-    existing.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    existing.classList.add('star-highlight');
-    setTimeout(() => existing.classList.remove('star-highlight'), 2000);
-    return;
-  }
-  // 消息不在已加载范围，用 around API 加载
+  _suppressScrollBottom = true;
   try {
+    // 如果不在当前对话，先切换
+    if (currentConvId !== convId) {
+      await selectConv(convId);
+    }
+    // 检查消息是否已在当前加载的列表中
+    const existing = document.getElementById('m_' + msgId);
+    if (existing) {
+      existing.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      existing.classList.add('star-highlight');
+      setTimeout(() => existing.classList.remove('star-highlight'), 2000);
+      return;
+    }
+    // 消息不在已加载范围，用 around API 加载
     const msgs = await api("GET", `/api/conversations/${convId}/messages-around/${msgId}?limit=25`);
     if (msgs.length === 0) return;
     currentMessages = msgs;
@@ -2652,7 +2655,9 @@ async function jumpToStarredMsg(convId, msgId) {
         setTimeout(() => el.classList.remove('star-highlight'), 2000);
       }
     });
-  } catch(e) { console.error('跳转失败:', e); }
+  } catch(e) { console.error('跳转失败:', e); } finally {
+    requestAnimationFrame(() => { _suppressScrollBottom = false; });
+  }
 }
 
 // ── 音乐卡片 ──
@@ -4153,16 +4158,21 @@ async function _voiceSendMessage(audioBlob, duration) {
     alert('语音上传失败'); return;
   }
 
-  // 2. 转写音频
+  // 2. 转写音频（失败自动重试一次）
   const fd2 = new FormData();
   fd2.append('file', audioBlob, `voice.${ext}`);
   let transcript = '';
-  try {
-    const res2 = await fetch('/api/voice/transcribe', { method: 'POST', body: fd2 });
-    const r2 = await res2.json();
-    transcript = r2.text || '';
-  } catch (e) {
-    console.warn('[VoiceMsg] Transcribe failed:', e);
+  for (let _try = 0; _try < 2; _try++) {
+    try {
+      const body2 = _try === 0 ? fd2 : (() => { const f = new FormData(); f.append('file', audioBlob, `voice.${ext}`); return f; })();
+      const res2 = await fetch('/api/voice/transcribe', { method: 'POST', body: body2 });
+      const r2 = await res2.json();
+      transcript = r2.text || '';
+      if (transcript) break;
+      console.warn(`[VoiceMsg] Transcribe attempt ${_try+1} returned empty, ${_try === 0 ? 'retrying...' : 'giving up'}`);
+    } catch (e) {
+      console.warn(`[VoiceMsg] Transcribe attempt ${_try+1} failed:`, e);
+    }
   }
 
   // 3. 构建语音附件
