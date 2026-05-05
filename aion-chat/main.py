@@ -17,6 +17,9 @@ class _QuietCamFilter(logging.Filter):
         return not any(p in msg for p in self._noisy)
 
 logging.getLogger("uvicorn.access").addFilter(_QuietCamFilter())
+
+# 静默 Windows asyncio ProactorEventLoop 连接重置的噪音日志
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 from fastapi.responses import FileResponse, HTMLResponse
 
 from config import BASE_DIR, PUBLIC_DIR, UPLOADS_DIR, SCREENSHOTS_DIR, load_cam_config
@@ -116,9 +119,17 @@ app = FastAPI(lifespan=lifespan)
 # 全局禁用静态文件缓存
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import Response
+
+_LOCAL_PREFIXES = ("127.", "192.168.", "::1", "localhost")
 
 class NoCacheStaticMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # 壁纸大文件只允许本地 IP 访问，远程设备不需要也避免占带宽
+        if request.url.path.startswith("/public/wallpaper/"):
+            client_ip = request.client.host if request.client else ""
+            if not any(client_ip.startswith(p) for p in _LOCAL_PREFIXES):
+                return Response("wallpaper only available on local network", status_code=403)
         response = await call_next(request)
         if request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
@@ -131,6 +142,7 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 app.mount("/public", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
 app.mount("/screenshots", StaticFiles(directory=str(SCREENSHOTS_DIR)), name="screenshots")
+app.mount("/aion-pet", StaticFiles(directory=str(BASE_DIR.parent / "AionPet")), name="aion-pet")
 
 # 路由
 app.include_router(chat.router)
@@ -221,6 +233,10 @@ async def fund_page():
 async def wallpaper_page():
     return FileResponse(BASE_DIR / "static" / "wallpaper.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
+@app.get("/pet")
+async def pet_page():
+    return FileResponse(BASE_DIR / "static" / "pet.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
 # PWA：Service Worker 必须从根路径提供，作用域才能覆盖所有页面
 @app.get("/sw.js")
 async def service_worker():
@@ -245,6 +261,8 @@ async def websocket_endpoint(ws: WebSocket):
                     manager.set_tts_state(ws, msg.get("enabled", False), msg.get("voice", ""))
                 elif msg.get("type") == "register_client":
                     manager.register_client_id(ws, msg.get("client_id", ""))
+                elif msg.get("type") == "pet_state":
+                    manager.set_pet_state(ws, msg.get("enabled", False))
             except (json.JSONDecodeError, Exception):
                 pass
     except WebSocketDisconnect:

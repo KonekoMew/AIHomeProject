@@ -119,12 +119,12 @@ def sanitize_filename(name):
 # ── 模型配置 ─────────────────────────────────────
 MODELS = {
     "硅基GLM-5.1":      {"provider": "siliconflow", "model": "Pro/zai-org/GLM-5.1"},
-    "硅基Kimi-K2.6":    {"provider": "siliconflow", "model": "Pro/moonshotai/Kimi-K2.6"},
+    "硅基GLM-5":    {"provider": "siliconflow", "model": "Pro/zai-org/GLM-5"},
+    "硅基Kimi2.6":    {"provider": "siliconflow", "model": "Pro/moonshotai/Kimi-K2.6"},
     "gemini-2.5-pro":  {"provider": "gemini", "model": "gemini-2.5-pro"},
-    "gemini-3-flash":  {"provider": "gemini", "model": "gemini-3-flash-preview"},
     "gemini-3.1-pro":  {"provider": "gemini", "model": "gemini-3.1-pro-preview"},
-    "claude-sonnet-4-6": {"provider": "aipro", "model": "claude-sonnet-4-6"},
-    "claude-opus4.6":  {"provider": "aipro", "model": "claude-opus-4-6"},
+    "哈基米opus4.7": {"provider": "aipro", "model": "claude-opus-4-7"},
+    "哈基米opus4.6":  {"provider": "aipro", "model": "claude-opus-4-6"},
     "哈基米gpt-5.5":    {"provider": "aipro", "model": "gemini-3.1-pro-high"},
     "哈基米3.1pro":     {"provider": "aipro", "model": "gemini-3.1-pro-high"},
     

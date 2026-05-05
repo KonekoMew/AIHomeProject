@@ -15,6 +15,7 @@ class ConnectionManager:
         self._tts_fallback: dict = {}  # {"enabled": bool, "voice": str} — 来自 HTTP 请求的备用 TTS 状态
         self.client_ids: dict[WebSocket, str] = {}     # {ws: client_id} — 客户端唯一标识
         self._last_sender_client_id: str | None = None  # 最后发消息的客户端 ID
+        self.pet_clients: dict[WebSocket, bool] = {}    # {ws: enabled} — 在线桌宠客户端
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
@@ -26,6 +27,7 @@ class ConnectionManager:
             self.active.remove(ws)
         self.tts_clients.pop(ws, None)
         self.client_ids.pop(ws, None)
+        self.pet_clients.pop(ws, None)
         log.info("WS disconnected, total=%d", len(self.active))
 
     def register_client_id(self, ws: WebSocket, client_id: str):
@@ -33,6 +35,15 @@ class ConnectionManager:
 
     def set_last_sender(self, client_id: str):
         self._last_sender_client_id = client_id
+
+    def set_pet_state(self, ws: WebSocket, enabled: bool):
+        if enabled:
+            self.pet_clients[ws] = True
+        else:
+            self.pet_clients.pop(ws, None)
+
+    def has_active_pet(self) -> bool:
+        return any(self.pet_clients.values())
 
     async def send_to_client(self, client_id: str, data: dict):
         """定向推送消息到指定 client_id 的客户端"""
