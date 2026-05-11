@@ -5,17 +5,19 @@
 
 ## 技术栈
 - **后端**：Python FastAPI + SQLite (aiosqlite) + WebSocket
-- **前端**：多页面架构（原生 JS，无框架），暖光主题，手机/PC 自适应。chat.html 为主聊天页，独立功能页通过 common.css/common.js 共享样式和工具函数
+- **前端**：多页面架构（原生 JS，无框架），暖光主题，手机/PC 自适应。chat.html/css/js 为主聊天页（结构/样式/逻辑分离），独立功能页通过 common.css/common.js 共享样式和工具函数
 - **摄像头**：OpenCV (`cv2`) DirectShow 后端后台线程采集 + ESP32-CAM HTTP 远程抓帧（双摄切换 + App 桥接模式）
 - **语音**：WebRTC VAD 语音检测 + 硬基流动 ASR (SenseVoiceSmall) + TTS (CosyVoice2) + 语音消息（按住录制）
-- **AI 接口**：硬基流动（OpenAI 兼容）、Google Gemini（REST API）、AiPro 中转站（OpenAI 兼容）
+- **AI 接口**：硬基流动（OpenAI 兼容）、Google Gemini（REST API）、AiPro 中转站（OpenAI 兼容）、Gemini CLI（本地子进程调用，免费 OAuth 认证）、Codex CLI（本地子进程调用，Connor 专用）
 - **AI 生图**：Gemini `gemini-3.1-flash-image-preview`（REST API generateContent，responseModalities=["IMAGE"]）
 - **Embedding**：Gemini `gemini-embedding-001`（3072维），余弦相似度检索
 - **Android App**：Java，WebView + 前台推送服务（OkHttp 4.12.0 WebSocket）+ 原生录音桥 + 原生摄像头桥 + 原生视频录制桥（MediaCodec + MediaMuxer），compileSdk 34 / minSdk 24
 - **音乐**：pyncm（网易云音乐 API，搜索/歌曲详情/音频URL，支持 MUSIC_U Cookie VIP 登录 + 服务端代理推流）
 - **EPUB 解析**：ebooklib（EPUB 读取）+ BeautifulSoup4 / lxml（HTML 解析）
 - **基金监控**：akshare（A股/基金数据拉取）+ chinese-calendar（中国节假日/交易日判断）
-- **依赖库**：fastapi, uvicorn, httpx, aiosqlite, opencv-python, Pillow, sounddevice, numpy, webrtcvad-wheels, pyncm, pywin32, psutil, ebooklib, beautifulsoup4, lxml, akshare, chinese-calendar
+- **MCP 娱乐室**：mcp（Python MCP SDK，支持 Streamable HTTP / stdio 传输，接入外部服务如 AI 小镇）
+- **聊天室**：三人群聊（用户 + Aion + Connor-Codex），Connor 代理通过 HTTP 轮询接入 Codex CLI 服务，随机回复顺序，统一时间线上下文（私聊+群聊合并排序，场景切换标记），统一记忆总结（Aion/Connor 各自合并私聊+群聊消息总结，独立锚点，1小时无新消息自动触发），图片收发（用户发图→CLI 管线通过本地绝对路径传递、API 管线通过 base64 内嵌，Codex 回复 `[[image:...]]` 标记→前端渲染，图片存储于 `Connor-Codex/uploads/YYYY-MM-DD/`），TTS 语音合成（Aion/Connor 独立音色配置，硬基流动 CosyVoice2 服务端流式切分+并行合成，通过 SSE 推送音频分段顺序播放，配置持久化 localStorage）
+- **依赖库**：fastapi, uvicorn, httpx, aiosqlite, opencv-python, Pillow, sounddevice, numpy, webrtcvad-wheels, pyncm, pywin32, psutil, ebooklib, beautifulsoup4, lxml, akshare, chinese-calendar, mcp
 
 ## 模块化文件结构
 项目已从单文件拆分为 12 个模块化文件：
@@ -49,12 +51,12 @@
 │   └── 逆向分析笔记.md           # SOSEXY 设备协议逆向笔记
 ├── 启动壁纸.bat                  # Chrome App 模式无边框全屏启动动态壁纸
 └── aion-chat/
-    ├── main.py                   # 入口：lifespan、路由注册、静态挂载、WebSocket、PWA 路由、自动记忆总结定时任务
+    ├── main.py                   # 入口：lifespan、路由注册、静态挂载、WebSocket、PWA 路由、自动记忆总结定时任务（私聊+群聊空闲检测）、Connor自动总结定时任务
     ├── config.py                 # 全局路径、常量、settings/worldbook/chat_status/cam_config 读写
     ├── database.py               # SQLite 初始化（conversations/messages/memories/schedules/theater 等表 + 性能索引）
     ├── ws.py                     # WebSocket ConnectionManager 单例，含 tts_clients 状态追踪 + _tts_fallback HTTP 回落机制 + client_id 注册/定向推送
-    ├── ai_providers.py           # AI 调用：硅基流动/Gemini/AiPro中转站 流式 + 非流式 + 多模态消息构建
-    ├── memory.py                 # 向量记忆：embedding、综合评分召回、手动/自动总结、即时哨兵(RAG路由)、原文追溯
+    ├── ai_providers.py           # AI 调用：硅基流动/Gemini/AiPro中转站/GeminiCLI 流式 + 非流式 + 多模态消息构建
+    ├── memory.py                 # 向量记忆：embedding、综合评分召回、手动/自动总结（合并私聊+群聊消息）、即时哨兵(RAG路由)、原文追溯
     ├── camera.py                 # 摄像头：CameraMonitor 类、Sentinel 分析（注入设备活动摘要）、Core 唤醒、[CAM_CHECK]、ESP32-CAM 双摄切换+App桥接
     ├── location.py               # 高德地图定位：GPS心跳处理、三级研判、状态机(at_home/outside)、哨兵通知、POI搜索
     ├── voice.py                  # 语音唤醒 + 半双工通话（WebRTC VAD + 硬基流动 ASR），通话中自动携带 TTS 参数
@@ -65,6 +67,9 @@
     ├── fund.py                    # 基金持仓监控：akshare数据拉取、盈亏计算、上证指数、历史走势、AI分析prompt生成、每日14:45定时任务(FundScheduler)
     ├── book.py                    # EPUB 解析模块：书籍导入、章节拆分、段落标注、图片提取
     ├── image_gen.py               # AI 生图模块：Gemini 图片生成（SELFIE/DRAW 模式）
+    ├── mcp_client.py              # MCP 连接管理器：管理多个 MCP Server 连接（HTTP/stdio）、工具发现、统一 call_tool 接口、转换 OpenAI tools 格式
+    ├── context_builder.py          # 统一上下文构建：fetch_merged_timeline（合并私聊+群聊消息时间线）、render_merged_timeline（场景切换标记渲染）、build_ability_block、build_memory_blocks、strip_tool_commands
+    ├── chatroom.py                # 聊天室核心逻辑：Connor-Codex 代理调用（HTTP+taskId轮询+images）、统一时间线上下文构建、统一记忆总结（Connor 1v1+群聊合并，独立锚点 connor_unified）、1h无消息自动总结
     ├── routes/
     │   ├── __init__.py
     │   ├── book.py               # 阅读功能 API：书籍上传/列表/章节/进度/删除/图片/AI批注（单段+全章SSE）
@@ -83,7 +88,9 @@
     │   ├── ghost_forest.py       # 奥罗斯幽林 TRPG API（16 个端点：人设/会话/剧情生成/选择/骰子/大结局）+ SSE 流式 TTS
     │   ├── gift.py               # 礼物系统 API（pending/receive/list/delete/test）
     │   ├── fund.py               # 基金监控 API：持仓CRUD、配置开关、数据拉取、手动触发AI分析、缓存读取、历史走势
+    │   ├── playground.py         # 娱乐室 API：MCP Server 连接/断开、tool calling 循环、SSE 流式行动日志、经历总结归档
     │   └── wallpaper.py          # 动态壁纸 API：文件列表/配置读写/上传/删除
+    │   └── chatroom.py           # 聊天室 API：房间 CRUD、发消息(SSE)、AI 互聊(SSE)、记忆 CRUD、配置、Connor 状态、总结记忆、图片上传（/api/chatroom/upload）+ 图片路径重写 + TTS流式合成（Aion/Connor独立音色）
     ├── activity.py               # 设备活动日志：JSONL 存储、自动清理（保留最近 3 小时）、PC 前台窗口采集（win32gui+psutil）、App 包名→中文名映射、10分钟窗口摘要（时长权重+carry-forward状态追溯）、AI联动开关+Prompt摘要生成
     ├── music.py                  # pyncm 封装层（搜索/歌曲详情/音频URL/MUSIC_U Cookie 登录/匿名登录）
     ├── README.md                 # 本文件
@@ -91,6 +98,8 @@
     ├── static/
     │   ├── home.html             # 手机风格主页 → /（应用图标网格 + Dock 栏）
     │   ├── chat.html             # 主聊天页 → /chat（含语音唤醒/TTS/BLE/音乐/系统日志/debug面板）
+    │   ├── chat.css              # 主聊天页样式（从 chat.html 拆分）
+    │   ├── chat.js               # 主聊天页逻辑（从 chat.html 拆分）
     │   ├── common.css            # 子页面共享样式（CSS变量/布局/组件/闹铃弹窗/toast）
     │   ├── common.js             # 子页面共享工具（api()/WS连接/闹铃弹窗/系统通知）
     │   ├── settings.html         # 设置页 → /settings（API Key 管理）
@@ -107,6 +116,12 @@
     │   ├── ghost-forest.html     # 奥罗斯幽林页 → /ghost-forest（TRPG 游戏：D20 骰子+角色扮演+AI DM）
     │   ├── gift.html              # 爱的印记页 → /gift（礼物陈列馆，缩略图网格+详情弹窗）
     │   ├── fund.html              # 奥罗斯财团页 → /fund（基金持仓监控、数据拉取、AI分析、持仓管理）
+    │   ├── playground.html        # 娱乐室页 → /playground（MCP 服务连接 + AI 自主探索 + 行动日志 + 历史记录）
+    │   ├── playground.css         # 娱乐室样式
+    │   ├── playground.js          # 娱乐室前端逻辑（SSE 实时渲染 + 历史记录加载）
+    │   ├── chatroom.html          # 聊天室页 → /chatroom（三人群聊 + Connor 私聊 + 房间管理 + 记忆库悬浮窗 + 图片收发 + TTS设置）
+    │   ├── chatroom.css           # 聊天室样式（暖色三人气泡、头像、双换行拆分气泡、图片预览/查看器/内联图片、TTS滑块开关）
+    │   ├── chatroom.js            # 聊天室前端逻辑（SSE流式、AI互聊、记忆CRUD、世界书人设继承、图片上传/粘贴/[[image:]]渲染、TTS分段队列播放+音色配置持久化）
     │   ├── wallpaper.html         # 动态壁纸页 → /wallpaper（全屏壁纸轮播+AI气泡，独立显示器使用）
     │   ├── video-call.js         # 视频通话模块：摄像头预览 + 按住录制视频 + ASR转写 + 来电/去电 UI
     │   ├── manifest.json         # PWA Web App Manifest（从 /manifest.json 提供）
@@ -129,6 +144,7 @@
         ├── theater_personas.json # 小剧场角色预设（多套人设，JSON数组）
         ├── fund_config.json      # 基金监控配置（开关、投资倾向）
         ├── fund_cache.json       # 基金数据缓存（最近一次拉取结果）
+        ├── mcp_servers.json      # MCP Server 配置（娱乐室服务地址列表）
         ├── wallpaper_config.json  # 动态壁纸配置（轮换间隔、文件启用状态、气泡锚点坐标）
         └── ghost_forest/          # 奥罗斯幽林 TRPG 数据
             ├── _personas.json     # DM/玩家人设预设
@@ -154,12 +170,14 @@
 | `/ghost-forest` | ghost-forest.html 奥罗斯幽林页（TRPG 冒险游戏） |
 | `/gift` | gift.html 爱的印记页（礼物陈列馆） |
 | `/fund` | fund.html 奥罗斯财团页（基金持仓监控） |
+| `/playground` | playground.html 娱乐室页（MCP 服务接入 + AI 自主探索） |
 | `/wallpaper` | wallpaper.html 动态壁纸页（全屏壁纸轮播+AI气泡） |
 | `/manifest.json` | PWA Web App Manifest |
 | `/sw.js` | PWA Service Worker（根路径提供，作用域覆盖全站） |
 | `/public/*` | 公共资源 |
 | `/static/*` | 静态文件 |
-| `/uploads/*` | data/uploads/ |
+| `/uploads/*` | data/uploads/（主聊天上传） |
+| `/cr-uploads/*` | Connor-Codex/uploads/（聊天室图片，按日期子目录） |
 | `/api/*` | 后端 API |
 | `/ws` | WebSocket 多端同步 |
 
@@ -1461,6 +1479,24 @@
 **解决**：`except Exception` 兜底 + `finally: manager.disconnect(ws)` 确保任何原因断开都清理。
 **教训**：**WebSocket 端点的异常处理不要只 catch 特定异常，用 `except Exception` + `finally` 确保连接清理。**
 
+### 坑 10：CLI 管线图片不能用 base64 内嵌
+**现象**：用户在 Aion 私聊（Gemini CLI）和 Connor 私聊/群聊（Codex CLI）发送图片时报错。Gemini CLI: `Separator is not found, and chunk exceed the limit`；Codex CLI: `Input exceeds the maximum length of 1048576 characters`。
+**原因**：CLI 工具通过 stdin 管道接收 prompt，有长度限制（Codex CLI 明确 1MB 上限）。一张普通照片 base64 编码后几百 KB 到几 MB，直接内嵌必然超限。而 Gemini 原生 API 通过 HTTP POST JSON body 传输，几乎无大小限制，所以同样的 base64 方式在 API 调用中没问题。
+**解决**：CLI 管线改为传本地文件绝对路径，让 CLI 自行读取文件。API 管线（硅基流动/Gemini 原生）保持 base64 不变。
+**教训**：**不同 AI 调用方式对输入大小的限制不同。CLI stdin 有长度上限，不能简单复用 API 的 base64 方案。CLI 工具原生支持读取本地文件路径，应该利用这个能力。**
+
+### 坑 11：`fetch_merged_timeline` 的 room_id 参数语义混淆
+**现象**：Connor 私聊窗口合并时间线查询不到任何群聊消息，只能看到自己的私聊历史。
+**原因**：`fetch_merged_timeline(who, limit, room_id=room_id)` 中的 `room_id` 参数用于指定**群聊房间**ID，但 `build_connor_1v1_prompt` 错误地传入了 1v1 私聊的 room_id。函数内部用这个 room_id 去 `chatroom_rooms` 表查 `type='group'` 的房间，自然查不到。
+**解决**：Connor 1v1 调用时不传 `room_id`，让函数自动查找最新的群聊房间。
+**教训**：**函数参数语义不明确时容易误传。`room_id` 这个参数名无法区分是私聊房间还是群聊房间，应该在文档/注释中明确标注参数用途。**
+
+### 坑 12：Connor 群聊管线手动转纯文本丢失附件
+**现象**：Connor 群聊回复时看不到用户发送的图片，即使 `_build_cli_prompt` 已经支持附件处理。
+**原因**：`_reply_connor` 在调用 `stream_connor_cli` 之前，先把 `connor_history`（含 attachments）手动转为纯文本字符串（遍历 content 拼接），然后 `stream_connor_cli(prompt_text)` 再包装成 `[{"role": "user", "content": text}]`。附件信息在手动转文本这一步就已丢失，`_build_cli_prompt` 的附件处理逻辑永远触发不到。
+**解决**：`stream_connor_cli` 新增 `messages` 参数，`_reply_connor` 直接传 `connor_history`（保留 attachments），跳过手动转文本步骤。
+**教训**：**修复底层函数（`_build_cli_prompt`）时，必须检查整条调用链是否有中间层把信息提前丢弃了。"数据在到达修复点之前就已经丢失"是很隐蔽的 bug。**
+
 ### 最终技术方案总结
 | 组件 | 技术选型 | 关键参数 |
 |------|---------|---------|
@@ -1518,6 +1554,94 @@ python main.py
 | 长按返回键无效（Vivo X300 Pro 手势导航） | `onKeyLongPress` 不适用于手势导航的侧滑返回 | 改为 `onBackPressed` 弹出 AlertDialog |
 
 ## 更新日志
+
+### 2026-05-10 — CLI 图片管线修复 + Connor 跨窗口上下文 + 多场景群聊集成
+
+**背景**：
+1. Connor 私聊窗口看不到群聊消息（`build_connor_1v1_prompt` 传了 1v1 的 room_id 给 `fetch_merged_timeline` 的 `room_id` 参数，但该参数是用于指定群聊房间的，导致 0 条群聊消息被合并）
+2. 闹铃/监控/哨兵/cam_check 等触发场景只能看到私聊历史，无法感知群聊上下文
+3. 通过 Gemini CLI 和 Codex CLI 发送图片全部报错（Gemini CLI: `Separator is not found, and chunk exceed the limit`；Codex CLI: `Input exceeds the maximum length of 1048576 characters`）
+
+**改动内容**：
+
+1. **`ai_providers.py` — `_build_cli_prompt` 图片/音频本地路径传递**
+   - 旧方式：完全忽略 messages 中的 `attachments` 字段
+   - 中间尝试：将图片转 base64 内嵌到 prompt 文本 → 失败（base64 编码后轻松超过 CLI stdin 的长度限制）
+   - 最终方案：解析附件为本地绝对路径，直接写入 prompt 文本，由 CLI 自行读取文件
+   - 支持 image/* 和 audio/* 两类附件，结构化附件（voice/video dict）跳过（已有 transcript 文本兜底）
+
+2. **`chatroom.py` — `stream_connor_cli` 支持 messages 列表**
+   - 新增 `messages` 参数，可直接传入完整消息列表（保留附件），不再强制转为纯文本
+   - 传入 messages 时自动注入 Connor persona 作为 system 消息
+
+3. **`chatroom.py` — `build_connor_1v1_prompt` → `build_connor_1v1_context`**
+   - 从返回纯文本 prompt 改为返回 messages 列表，timeline 消息保留 attachments 字段
+   - 修复 `room_id` 参数误传问题（不再传 1v1 room_id 给 `fetch_merged_timeline`）
+
+4. **`routes/chatroom.py` — Connor 群聊/私聊管线改造**
+   - `_reply_connor`（群聊）：不再手动将 history 转为纯文本（丢失附件），直接传 `connor_history` 给 `stream_connor_cli(messages=...)`
+   - `_generate_connor_reply`（私聊）：改用 `build_connor_1v1_context` + `stream_connor_cli(messages=...)`
+
+5. **`schedule.py` — 闹铃/监控触发集成群聊上下文**
+   - `_fire_alarm`、`_fire_monitor`：使用 `fetch_merged_timeline` 替代原来只查私聊的逻辑，懒导入避免循环依赖
+
+6. **`camera.py` — 哨兵/cam_check 集成群聊上下文**
+   - `_call_core`（哨兵 Core 唤醒）、`perform_cam_check`（主动查看监控）：同样使用 `fetch_merged_timeline`，懒导入避免循环依赖
+
+**不影响的线路**：硅基流动（`build_multimodal_messages`，base64 内嵌 API JSON）和 Gemini 原生 API（`build_gemini_contents`，base64 内嵌 `inline_data`）的图片处理方式不变
+
+**踩坑记录**：见下方坑 10、坑 11、坑 12
+
+### 2026-05-09 — 统一时间线上下文 + 统一记忆总结
+
+**背景**：之前 Aion 私聊只能看到私聊历史，群聊只能看到群聊历史，两个 AI 的记忆总结也各自独立（Connor 私聊和群聊分别总结，群聊记忆还要同步一份到 Aion 主库）。改为统一时间线，让每个 AI 都能同时看到私聊和群聊内容，记忆总结也合并处理。
+
+**改动内容**：
+
+1. **新增 `context_builder.py`** — 统一上下文构建模块：
+   - `fetch_merged_timeline(who, limit, *, conv_id, room_id)`：同时查询 `messages` 和 `chatroom_messages` 两张表，按 `created_at` 合并排序，返回统一时间线
+   - `render_merged_timeline(merged, who)`：将合并时间线转为 AI 历史格式，私聊/群聊混合时自动插入场景切换标记 `[以下为群聊记录]` / `[以下为私聊记录]`，消息前缀带 `[群聊]` / `[私聊]` 标签
+   - `build_ability_block()`、`build_memory_blocks()`、`strip_tool_commands()` 等工具函数从各处抽取统一
+
+2. **`routes/chat.py`** — Aion 私聊上下文统一：
+   - `send_message`、`edit_resend`、`regenerate` 三个函数的历史构建改为 `fetch_merged_timeline("aion")` + `render_merged_timeline()`，Aion 在私聊中也能看到群聊内容
+
+3. **`chatroom.py`** — 群聊上下文 + Connor 记忆统一：
+   - `build_aion_group_context()` / `build_connor_group_context()`：改用统一时间线，移除旧的跨窗口上下文注入
+   - `digest_chatroom()`：合并 Connor 1v1 + 群聊消息统一总结，使用 `connor_unified` 锚点，scope 固定为 `"connor"`，删除"群聊记忆同步写入 Aion 主库"逻辑（两个 AI 各管各的记忆）
+   - `_connor_1v1_auto_digest_loop()`：不再查找特定房间，直接调用 `digest_chatroom()` 统一总结
+   - `connor_1v1_on_message()`：群聊消息也触发计时器重置
+
+4. **`memory.py`** — Aion 记忆总结统一：
+   - `_do_digest()`：在私聊消息基础上追加查询群聊 `chatroom_messages`，标记 `_source`（private/group），混合来源时消息格式带 `[群聊]` / `[私聊]` 标签
+
+5. **`main.py`** — 自动总结空闲检测增强：
+   - `_auto_digest_loop()`：同时检查 `messages` 和 `chatroom_messages` 两张表的最后用户消息时间，避免群聊活跃时误触发私聊自动总结
+
+6. **`routes/chatroom.py`** — 触发器扩展：
+   - `_save_msg()`：群聊消息也触发 `connor_1v1_on_message()` 重置自动总结计时器
+
+7. **Bug 修复**：
+   - 流式输出气泡残留原始指令：`aion_done` / `connor_done` 事件用服务端清洗后的内容替换 streamingText
+   - 闹铃/日程创建时缺少系统消息：在 `process_schedule_commands` 之前预检测指令并插入系统提示
+   - 音乐点歌后不自动播放：添加 `autoplay: True` 参数
+
+### 2026-05-08 — Gemini CLI 本地调用接入
+
+**背景**：Gemini CLI（`@google/gemini-cli`）支持通过 Google OAuth 免费调用 Gemini 模型，无需 API Key。将其作为第四种 AI 调用方式集成到项目中。
+
+**改动内容**：
+1. **`ai_providers.py`**：
+   - 新增 `_find_gemini_script()`：自动定位全局安装的 gemini CLI 脚本（npm root -g 方式 + gemini.cmd 位置推导）
+   - 新增 `_build_cli_prompt(messages)`：将 messages 列表拼成 `[System Instruction] / [User] / [Assistant]` 格式的完整 prompt
+   - 新增 `call_gemini_cli()` 异步生成器：通过 `asyncio.create_subprocess_exec` 启动 CLI 子进程，stdin 传入 prompt（绕过 Windows 命令行 8K 长度限制），流式读取 stdout 并 yield
+   - `stream_ai()` 新增 `gemini_cli` provider 路由分支
+2. **`config.py`**：`MODELS` 字典新增 `CLI-2.5pro`、`CLI-3.1pro`、`CLI-2.5flash` 三个模型
+3. **新增 `cli线部署教程.md`**：面向朋友的 CLI 线路部署指南
+
+**使用方式**：聊天界面右上角切换模型到 `CLI-xxx`，其余（人设、记忆、指令解析、TTS）全部照常工作。不需要额外启动任何服务。
+
+**部署前置**：`npm install -g @google/gemini-cli` + 首次运行 `gemini` 完成 OAuth 认证
 
 ### 2026-04-08 — UI 多页面拆分重构
 

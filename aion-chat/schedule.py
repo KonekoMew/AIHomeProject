@@ -13,7 +13,7 @@ import aiosqlite
 from config import DB_PATH, DEFAULT_MODEL, load_worldbook, SETTINGS
 from database import get_db
 from ws import manager
-from ai_providers import stream_ai
+from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from memory import recall_memories
 from music import search_songs, get_audio_url
 from routes.music import MUSIC_CMD_PATTERN
@@ -157,20 +157,10 @@ class ScheduleManager:
             conv_id = conv["id"]
             model_key = conv["model"] or DEFAULT_MODEL
 
-            cur = await db.execute(
-                "SELECT role, content, attachments FROM messages WHERE conv_id=? "
-                "AND role IN ('user','assistant') ORDER BY created_at DESC LIMIT 20",
-                (conv_id,),
-            )
-            rows = await cur.fetchall()
-            history = []
-            for r in reversed(rows):
-                d = dict(r)
-                try:
-                    d["attachments"] = json.loads(d.get("attachments") or "[]") if d.get("attachments") else []
-                except Exception:
-                    d["attachments"] = []
-                history.append(d)
+        # 统一时间线：合并私聊 + 群聊消息
+        from context_builder import fetch_merged_timeline, render_merged_timeline
+        merged = await fetch_merged_timeline("aion", 20, conv_id=conv_id)
+        history = render_merged_timeline(merged, "aion")
 
         # 世界书前缀
         prefix = []
@@ -237,6 +227,8 @@ class ScheduleManager:
         try:
             _temp = SETTINGS.get("temperature")
             async for chunk in stream_ai(messages, model_key, temperature=_temp):
+                if chunk.startswith(CLI_STATUS_PREFIX):
+                    continue
                 full_text += chunk
                 if alarm_tts:
                     alarm_tts.feed(chunk)
@@ -358,22 +350,10 @@ class ScheduleManager:
             conv_id = conv["id"]
             model_key = conv["model"] or DEFAULT_MODEL
 
-            cur = await db.execute(
-                "SELECT role, content, attachments FROM messages WHERE conv_id=? "
-                "AND role IN ('user','assistant') ORDER BY created_at DESC LIMIT 20",
-                (conv_id,),
-            )
-            rows = await cur.fetchall()
-            history = []
-            for r in reversed(rows):
-                d = dict(r)
-                try:
-                    d["attachments"] = json.loads(d.get("attachments") or "[]") if d.get("attachments") else []
-                except Exception:
-                    d["attachments"] = []
-                # 历史消息不带图片
-                d["attachments"] = []
-                history.append(d)
+        # 统一时间线：合并私聊 + 群聊消息
+        from context_builder import fetch_merged_timeline, render_merged_timeline
+        merged = await fetch_merged_timeline("aion", 20, conv_id=conv_id)
+        history = render_merged_timeline(merged, "aion")
 
         # 世界书前缀
         prefix = []
@@ -453,6 +433,8 @@ class ScheduleManager:
         try:
             _temp = SETTINGS.get("temperature")
             async for chunk in stream_ai(messages, model_key, temperature=_temp):
+                if chunk.startswith(CLI_STATUS_PREFIX):
+                    continue
                 full_text += chunk
                 if monitor_tts:
                     monitor_tts.feed(chunk)

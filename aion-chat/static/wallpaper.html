@@ -204,7 +204,7 @@ body:hover, body.panel-open { cursor: default; }
   <div class="settings-row">
     <label>轮换间隔</label>
     <input type="number" id="intervalInput" min="5" max="3600" value="30">
-    <span>秒</span>
+    <span>秒（视频将播放完再切换）</span>
   </div>
   <div class="settings-row">
     <label>气泡时长</label>
@@ -303,7 +303,8 @@ function showMedia(file, layerId, immediate) {
   if (file.type === 'video') {
     const v = document.createElement('video');
     v.src = `/public/wallpaper/${encodeURIComponent(file.name)}`;
-    v.muted = true; v.loop = true; v.playsInline = true;
+    v.muted = true; v.loop = false; v.playsInline = true;
+    v.addEventListener('ended', () => nextMedia());
     layer.appendChild(v);
     v.load();
     // 轮询检测视频就绪（readyState >= 2 表示有帧数据）
@@ -362,6 +363,9 @@ function startTimer() {
   stopTimer();
   const sec = (config.interval || 30) * 1000;
   timer = setInterval(() => {
+    // 如果当前是视频，不自动切换（等 ended 事件）
+    const cur = playlist[currentIndex];
+    if (cur && cur.type === 'video') return;
     nextMedia();
   }, sec);
 }
@@ -374,8 +378,8 @@ function updateBubbleAnchor() {
   if (playlist.length === 0) return;
   const file = playlist[currentIndex];
   const fc = config.files[file.name];
-  const x = fc?.bubble_anchor?.x ?? 98;
-  const y = fc?.bubble_anchor?.y ?? 50;
+  const x = fc?.bubble_anchor?.x ?? 95;
+  const y = fc?.bubble_anchor?.y ?? 5;
   // 用百分比定位
   bc.style.left = '';
   bc.style.right = '';
@@ -434,7 +438,7 @@ function _addOneBubble(text, container, duration) {
 
 function cleanAIText(text) {
   // 去除方括号指令
-  text = text.replace(/\[(?:MUSIC|ALARM|REMINDER|Monitor|TOY|查看动态|视频电话|POI_SEARCH|CAM_CHECK)[^\]]*\]/gi, '');
+  text = text.replace(/\[(?:MUSIC|ALARM|REMINDER|Monitor|TOY|PET|查看动态|视频电话|POI_SEARCH|CAM_CHECK)[^\]]*\]/gi, '');
   // 去除 markdown 格式
   text = text.replace(/\*\*(.+?)\*\*/g, '$1');
   text = text.replace(/\*(.+?)\*/g, '$1');
@@ -591,8 +595,8 @@ function enterAnchorEdit() {
   if (playlist.length > 0) {
     const file = playlist[currentIndex];
     const fc = config.files[file.name];
-    const x = fc?.bubble_anchor?.x ?? 98;
-    const y = fc?.bubble_anchor?.y ?? 50;
+    const x = fc?.bubble_anchor?.x ?? 95;
+    const y = fc?.bubble_anchor?.y ?? 5;
     marker.style.left = x + '%';
     marker.style.top = y + '%';
   }

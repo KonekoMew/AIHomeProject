@@ -426,6 +426,8 @@ async def _do_digest(min_messages: int = 0) -> dict:
 
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
+
+        # ── 私聊消息 ──
         cur = await db.execute(
             "SELECT id, conv_id, role, content, attachments, created_at FROM messages "
             "WHERE role IN ('user','assistant') AND created_at > ? "
@@ -433,6 +435,34 @@ async def _do_digest(min_messages: int = 0) -> dict:
             (anchor_ts,)
         )
         new_msgs = [dict(r) for r in await cur.fetchall()]
+        for m in new_msgs:
+            m["_source"] = "private"
+
+        # ── 群聊消息（纳入 Aion 视角的群聊记录）──
+        cur = await db.execute(
+            "SELECT id FROM chatroom_rooms WHERE type = 'group' ORDER BY updated_at DESC LIMIT 1"
+        )
+        group_room = await cur.fetchone()
+        if group_room:
+            cur = await db.execute(
+                "SELECT sender, content, created_at FROM chatroom_messages "
+                "WHERE room_id = ? AND created_at > ? AND sender != 'system' "
+                "ORDER BY created_at ASC",
+                (group_room["id"], anchor_ts),
+            )
+            for r in await cur.fetchall():
+                d = dict(r)
+                # 映射 sender → role（Aion 视角）
+                if d["sender"] == "aion":
+                    d["role"] = "assistant"
+                else:
+                    d["role"] = "user"
+                d["_source"] = "group"
+                d["attachments"] = None
+                new_msgs.append(d)
+
+        # 按时间排序合并
+        new_msgs.sort(key=lambda x: x["created_at"])
 
     # 语音消息：将转写文本注入 content，记忆总结使用纯文本
     for m in new_msgs:
@@ -484,11 +514,21 @@ async def _do_digest(min_messages: int = 0) -> dict:
         group_start = datetime.fromtimestamp(group[0]["created_at"]).strftime("%Y年%m月%d日 %H:%M")
         group_end = datetime.fromtimestamp(group[-1]["created_at"]).strftime("%Y年%m月%d日 %H:%M")
         date_header = f"[对话时间范围: {group_start} ~ {group_end}]\n"
-        messages_text = date_header + "\n".join([
-            f"[{datetime.fromtimestamp(m['created_at']).strftime('%m-%d %H:%M')}] "
-            f"{user_name if m['role']=='user' else ai_name}: {m['content'][:300]}"
-            for m in group
-        ])
+        # 判断该组是否混合了私聊和群聊
+        sources = set(m.get("_source", "private") for m in group)
+        has_mixed = len(sources) > 1
+        lines = []
+        for m in group:
+            ts = datetime.fromtimestamp(m["created_at"]).strftime("%m-%d %H:%M")
+            src = m.get("_source", "private")
+            sender = m.get("sender", "")
+            if src == "group":
+                name = {"user": user_name, "aion": ai_name, "connor": "Connor"}.get(sender, sender)
+            else:
+                name = user_name if m["role"] == "user" else ai_name
+            tag = f"[{'群聊' if src == 'group' else '私聊'}]" if has_mixed else ""
+            lines.append(f"[{ts}]{tag} {name}: {m['content'][:300]}")
+        messages_text = date_header + "\n".join(lines)
 
         prompt = (
             f"{persona_block}"

@@ -13,6 +13,8 @@ DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "chat.db"
 UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+CODEX_UPLOADS_DIR = BASE_DIR.parent / "Connor-Codex" / "uploads"
+CODEX_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 CHATS_DIR = DATA_DIR / "chats"
 CHATS_DIR.mkdir(exist_ok=True)
 SCREENSHOTS_DIR = DATA_DIR / "screenshots"
@@ -127,7 +129,10 @@ MODELS = {
     "哈基米opus4.6":  {"provider": "aipro", "model": "claude-opus-4-6"},
     "哈基米gpt-5.5":    {"provider": "aipro", "model": "gemini-3.1-pro-high"},
     "哈基米3.1pro":     {"provider": "aipro", "model": "gemini-3.1-pro-high"},
-    
+    "CLI-2.5pro":       {"provider": "gemini_cli", "model": "gemini-2.5-pro"},
+    "CLI-3.1pro":       {"provider": "gemini_cli", "model": "gemini-3.1-pro-preview"},
+    "CLI-2.5flash":     {"provider": "gemini_cli", "model": "gemini-2.5-flash"},
+    "Codex":            {"provider": "codex_cli",  "model": ""},
 }
 
 DEFAULT_MODEL = "gemini-3-flash"

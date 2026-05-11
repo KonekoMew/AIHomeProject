@@ -13,7 +13,7 @@ from config import (
 )
 from database import get_db
 from ws import manager
-from ai_providers import stream_ai
+from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from memory import recall_memories
 from tts import TTSStreamer
 
@@ -808,34 +808,10 @@ call_core判断依据：
             conv_id = conv["id"]
             model_key = conv["model"] or DEFAULT_MODEL
 
-            cur = await db.execute(
-                "SELECT role, content, attachments FROM messages WHERE conv_id=? AND role IN ('user','assistant') ORDER BY created_at DESC LIMIT 20",
-                (conv_id,)
-            )
-            rows = await cur.fetchall()
-            history = []
-            for r in reversed(rows):
-                d = dict(r)
-                # 语音消息：将转写文本注入 content
-                raw_atts = d.get("attachments", "")
-                try:
-                    atts = json.loads(raw_atts) if raw_atts else []
-                except Exception:
-                    atts = []
-                for att in atts:
-                    if isinstance(att, dict) and att.get("type") == "voice":
-                        transcript = att.get("transcript", "")
-                        if transcript:
-                            orig = d["content"].strip() if d["content"] else ""
-                            d["content"] = f"[语音消息] {transcript}" + (f"\n{orig}" if orig else "")
-                    elif isinstance(att, dict) and att.get("type") == "video_clip":
-                        transcript = att.get("transcript", "")
-                        if transcript:
-                            orig = d["content"].strip() if d["content"] else ""
-                            d["content"] = f"[视频通话] {transcript}" + (f"\n{orig}" if orig else "")
-                # 哨兵唤醒 Core 时不携带历史图片/音频，只带文本上下文
-                d["attachments"] = []
-                history.append(d)
+        # 统一时间线：合并私聊 + 群聊消息
+        from context_builder import fetch_merged_timeline, render_merged_timeline
+        merged = await fetch_merged_timeline("aion", 20, conv_id=conv_id)
+        history = render_merged_timeline(merged, "aion")
 
         prefix = []
         if wb.get("ai_persona"):
@@ -909,6 +885,8 @@ call_core判断依据：
         try:
             _temp = SETTINGS.get("temperature")
             async for chunk in stream_ai(messages, model_key, temperature=_temp):
+                if chunk.startswith(CLI_STATUS_PREFIX):
+                    continue
                 full_text += chunk
                 if core_tts:
                     core_tts.feed(chunk)
@@ -1007,37 +985,10 @@ async def perform_cam_check(conv_id: str, model_key: str):
         prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
 
-    # 获取最近对话上下文
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT role, content, attachments FROM messages WHERE conv_id=? AND role IN ('user','assistant') ORDER BY created_at DESC LIMIT 6",
-            (conv_id,)
-        )
-        rows = await cur.fetchall()
-    recent = []
-    for r in reversed(rows):
-        d = dict(r)
-        # 语音消息：将转写文本注入 content
-        raw_atts = d.get("attachments", "")
-        try:
-            atts = json.loads(raw_atts) if raw_atts else []
-        except Exception:
-            atts = []
-        for att in atts:
-            if isinstance(att, dict) and att.get("type") == "voice":
-                transcript = att.get("transcript", "")
-                if transcript:
-                    orig = d["content"].strip() if d["content"] else ""
-                    d["content"] = f"[语音消息] {transcript}" + (f"\n{orig}" if orig else "")
-            elif isinstance(att, dict) and att.get("type") == "video_clip":
-                transcript = att.get("transcript", "")
-                if transcript:
-                    orig = d["content"].strip() if d["content"] else ""
-                    d["content"] = f"[视频通话] {transcript}" + (f"\n{orig}" if orig else "")
-        # Core 主动查看监控时不携带历史图片/音频，只带文本上下文
-        d["attachments"] = []
-        recent.append(d)
+    # 获取最近对话上下文（统一时间线：合并私聊 + 群聊消息）
+    from context_builder import fetch_merged_timeline, render_merged_timeline
+    merged = await fetch_merged_timeline("aion", 6, conv_id=conv_id)
+    recent = render_merged_timeline(merged, "aion")
 
     cam_prompt = (
         f"你刚才想看看{user_name}在干什么，这是系统从监控摄像头抓取的实时画面。"
@@ -1062,6 +1013,8 @@ async def perform_cam_check(conv_id: str, model_key: str):
     try:
         _temp = SETTINGS.get("temperature")
         async for chunk in stream_ai(messages, model_key, temperature=_temp):
+            if chunk.startswith(CLI_STATUS_PREFIX):
+                continue
             full_text += chunk
             if cam_tts:
                 cam_tts.feed(chunk)

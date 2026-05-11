@@ -2,18 +2,20 @@
 聊天核心路由：对话 CRUD、消息 CRUD、send_message、regenerate
 """
 
-import json, time, asyncio, re
+import json, time, asyncio, re, shutil
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Any
 
-from config import DEFAULT_MODEL, load_worldbook, SETTINGS
+from config import DEFAULT_MODEL, load_worldbook, SETTINGS, UPLOADS_DIR, CODEX_UPLOADS_DIR, PUBLIC_DIR
 from database import get_db
 from ws import manager
-from ai_providers import stream_ai
+from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from memory import recall_memories, instant_digest, fetch_source_details, build_surfacing_memories, get_embedding, _pack_embedding
 from camera import cam, CAM_CHECK_CMD, perform_cam_check
 from activity import is_activity_tracking_enabled, get_activity_summary_for_prompt
@@ -35,6 +37,7 @@ THEATER_ITEM_PATTERN = re.compile(r'\[剧场道具[：:]([^\]]+)\]')
 
 # 允许进入上下文的 system 消息关键词（点歌、查看监控、查看动态）
 _SYSTEM_MSG_CONTEXT_KEYWORDS = ('查看了监控', '搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话')
+from context_builder import fetch_merged_timeline, render_merged_timeline
 from music import search_songs, get_audio_url
 from schedule import process_schedule_commands, get_active_schedules, build_schedule_prompt
 
@@ -87,11 +90,119 @@ POI_SEARCH_PATTERN = re.compile(r'\[POI_SEARCH:([^\]]+)\]')
 TOY_CMD_PATTERN = re.compile(r'\[TOY:(\d|STOP)\]')
 PET_CMD_PATTERN = re.compile(r'\[PET:([a-z_\-]+)\]', re.IGNORECASE)
 META_TAG_PATTERN = re.compile(r'\s*<meta>.*?</meta>', re.DOTALL)
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+_MD_IMAGE_PATTERN = re.compile(r'!\[[^\]]*\]\(([^)]+)\)')
+_MD_LINK_PATTERN = re.compile(r'(?<!!)\[[^\]]+\]\(([^)]+)\)')
+_BARE_HTTP_IMAGE_PATTERN = re.compile(r'(?<!["\'(])https?://[^\s<>"\']+\.(?:png|jpe?g|gif|webp)(?:\?[^\s<>"\']*)?', re.I)
+_BARE_LOCAL_IMAGE_PATTERN = re.compile(r'(?<![\w/])(?:[A-Za-z]:[\\/][^\s<>"\']+\.(?:png|jpe?g|gif|webp))', re.I)
 
 TOY_PRESET_NAMES = {1:'微风轻拂',2:'春水初生',3:'暗流涌动',4:'如梦似幻',5:'情潮渐涨',6:'烈焰焚身',7:'极乐之巅',8:'魂飞魄散',9:'失控'}
 
 def _is_pet_available() -> bool:
     return bool(SETTINGS.get("pet_enabled", False) and manager.has_active_pet())
+
+def _dedupe_attachments(items: list) -> list:
+    seen = set()
+    out = []
+    for item in items:
+        key = json.dumps(item, ensure_ascii=False, sort_keys=True) if isinstance(item, dict) else str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+def _clean_image_ref(ref: str) -> str:
+    ref = (ref or "").strip().strip("<>").strip()
+    if (ref.startswith('"') and ref.endswith('"')) or (ref.startswith("'") and ref.endswith("'")):
+        ref = ref[1:-1].strip()
+    if " " in ref and not ref.lower().startswith(("http://", "https://", "file://")):
+        first, rest = ref.split(" ", 1)
+        if rest.lstrip().startswith(('"', "'")):
+            ref = first
+    return ref
+
+def _path_url_for_local_image(ref: str) -> str | None:
+    raw = _clean_image_ref(ref).replace("\\", "/")
+    lower = raw.lower()
+    if lower.startswith(("http://", "https://")):
+        path = urlparse(raw).path
+        return raw if Path(path).suffix.lower() in _IMAGE_EXTS else None
+    if raw.startswith("/uploads/") or raw.startswith("/cr-uploads/") or raw.startswith("/public/"):
+        return raw
+    if lower.startswith("file://"):
+        parsed = urlparse(raw)
+        local = unquote(parsed.path)
+        if re.match(r"^/[A-Za-z]:/", local):
+            local = local[1:]
+        src = Path(local)
+    else:
+        src = Path(raw)
+    if not src.exists() or src.suffix.lower() not in _IMAGE_EXTS:
+        return None
+    try:
+        resolved = src.resolve()
+    except Exception:
+        resolved = src
+    try:
+        rel = resolved.relative_to(UPLOADS_DIR.resolve())
+        return "/uploads/" + rel.as_posix()
+    except Exception:
+        pass
+    try:
+        rel = resolved.relative_to(CODEX_UPLOADS_DIR.resolve())
+        return "/cr-uploads/" + rel.as_posix()
+    except Exception:
+        pass
+    try:
+        rel = resolved.relative_to(PUBLIC_DIR.resolve())
+        return "/public/" + rel.as_posix()
+    except Exception:
+        pass
+    dest_name = f"inline_{int(time.time()*1000)}_{src.name}"
+    dest = UPLOADS_DIR / dest_name
+    counter = 1
+    while dest.exists():
+        dest = UPLOADS_DIR / f"inline_{int(time.time()*1000)}_{counter}_{src.name}"
+        counter += 1
+    shutil.copy2(resolved, dest)
+    return f"/uploads/{dest.name}"
+
+def _extract_reply_image_attachments(text: str) -> tuple[str, list]:
+    """Turn image refs in AI text into message attachments so mobile clients render them."""
+    attachments = []
+    ref_cache = {}
+
+    def collect(ref: str):
+        key = _clean_image_ref(ref).replace("\\", "/")
+        if key in ref_cache:
+            url = ref_cache[key]
+        else:
+            url = _path_url_for_local_image(ref)
+            ref_cache[key] = url
+        if url:
+            attachments.append(url)
+
+    def strip_md_image(match):
+        collect(match.group(1))
+        return ""
+
+    def strip_md_link(match):
+        ref = match.group(1)
+        before = len(attachments)
+        collect(ref)
+        return "" if len(attachments) > before else match.group(0)
+
+    cleaned = _MD_IMAGE_PATTERN.sub(strip_md_image, text or "")
+    cleaned = _MD_LINK_PATTERN.sub(strip_md_link, cleaned)
+    for match in _BARE_HTTP_IMAGE_PATTERN.finditer(cleaned):
+        collect(match.group(0))
+    for match in _BARE_LOCAL_IMAGE_PATTERN.finditer(cleaned):
+        collect(match.group(0))
+    cleaned = _BARE_HTTP_IMAGE_PATTERN.sub("", cleaned)
+    cleaned = _BARE_LOCAL_IMAGE_PATTERN.sub("", cleaned)
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+    return cleaned, _dedupe_attachments(attachments)
 
 async def _toy_sys_msg(conv_id: str, commands: list):
     """为玩具指令插入系统消息"""
@@ -464,29 +575,9 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         conv = await cur.fetchone()
         model_key = conv["model"] if conv else DEFAULT_MODEL
 
-        cur = await db.execute(
-            "SELECT role, content, attachments, created_at FROM messages WHERE conv_id=? AND role IN ('user','assistant','system') ORDER BY created_at DESC LIMIT ?",
-            (conv_id, body.context_limit)
-        )
-        rows = await cur.fetchall()
-        history = []
-        for r in reversed(rows):
-            d = dict(r)
-            if d["role"] == "system":
-                if not any(kw in d["content"] for kw in _SYSTEM_MSG_CONTEXT_KEYWORDS):
-                    continue
-                d["role"] = "user"
-                d["content"] = f"[系统事件] {d['content']}"
-                d["attachments"] = []
-                history.append(d)
-                continue
-            try: d["attachments"] = json.loads(d.get("attachments") or "[]") if d.get("attachments") else []
-            except: d["attachments"] = []
-            d["content"] = META_TAG_PATTERN.sub("", d["content"]).strip()
-            if d.get("created_at"):
-                dt = datetime.fromtimestamp(d["created_at"])
-                d["content"] = f"{d['content']}\n<meta>发送时间：{dt.month}月{dt.day}日 {dt.strftime('%H:%M')}</meta>"
-            history.append(d)
+    # ── 合并私聊 + 群聊消息为统一时间线 ──
+    merged = await fetch_merged_timeline("aion", body.context_limit, conv_id=conv_id)
+    history = render_merged_timeline(merged, "aion")
 
     # 只保留最后一条用户消息的图片附件 + 语音消息处理
     _process_voice_attachments_in_history(history)
@@ -643,6 +734,9 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
             await _q.put({"id": ai_msg_id, "type": "start"})
             try:
                 async for chunk in stream_ai(history, model_key, usage_meta, max_tokens=body.max_tokens, cancel_event=cancel_event):
+                    if chunk.startswith(CLI_STATUS_PREFIX):
+                        await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
+                        continue
                     full_text += chunk
                     await _q.put({"type": "chunk", "content": chunk})
                     if tts_streamer:
@@ -763,7 +857,9 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
             full_text = META_TAG_PATTERN.sub("", full_text).strip()
 
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
-            att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else ""
+            full_text, image_atts = _extract_reply_image_attachments(full_text)
+            reply_atts = _dedupe_attachments(music_atts + image_atts)
+            att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()
             async with get_db() as db2:
@@ -774,7 +870,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 await db2.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now2, conv_id))
                 await db2.commit()
 
-            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": music_atts}
+            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts}
             await manager.broadcast({"type": "msg_created", "data": ai_msg})
             await export_conversation(conv_id)
 
@@ -895,32 +991,9 @@ async def send_message(conv_id: str, body: MsgCreate):
         conv = await cur.fetchone()
         model_key = conv["model"] if conv else DEFAULT_MODEL
 
-        cur = await db.execute(
-            "SELECT role, content, attachments, created_at FROM messages WHERE conv_id=? AND role IN ('user','assistant','system') ORDER BY created_at DESC LIMIT ?",
-            (conv_id, body.context_limit)
-        )
-        rows = await cur.fetchall()
-        history = []
-        for r in reversed(rows):
-            d = dict(r)
-            # 过滤 system 消息：只保留点歌/查看监控相关的
-            if d["role"] == "system":
-                if not any(kw in d["content"] for kw in _SYSTEM_MSG_CONTEXT_KEYWORDS):
-                    continue
-                # system 消息以 [系统事件] 前缀包装为 user 角色（AI 接口不支持 system role）
-                d["role"] = "user"
-                d["content"] = f"[系统事件] {d['content']}"
-                d["attachments"] = []
-                history.append(d)
-                continue
-            try: d["attachments"] = json.loads(d.get("attachments") or "[]") if d.get("attachments") else []
-            except: d["attachments"] = []
-            # 清洗消息中可能已有的 <meta> 标签（AI 模仿产生的），再附加系统时间戳
-            d["content"] = META_TAG_PATTERN.sub("", d["content"]).strip()
-            if d.get("created_at"):
-                dt = datetime.fromtimestamp(d["created_at"])
-                d["content"] = f"{d['content']}\n<meta>发送时间：{dt.month}月{dt.day}日 {dt.strftime('%H:%M')}</meta>"
-            history.append(d)
+    # ── 合并私聊 + 群聊消息为统一时间线 ──
+    merged = await fetch_merged_timeline("aion", body.context_limit, conv_id=conv_id)
+    history = render_merged_timeline(merged, "aion")
 
     # 只保留当前（最后一条）用户消息的图片附件，历史图片不带入上下文
     # 语音消息处理：历史语音消息用转写文本替代音频文件，当前消息保留音频原件
@@ -1147,6 +1220,9 @@ async def send_message(conv_id: str, body: MsgCreate):
             await _q.put({"id": ai_msg_id, "type": "start"})
             try:
                 async for chunk in stream_ai(history, model_key, usage_meta, max_tokens=body.max_tokens, cancel_event=cancel_event):
+                    if chunk.startswith(CLI_STATUS_PREFIX):
+                        await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
+                        continue
                     full_text += chunk
                     await _q.put({"type": "chunk", "content": chunk})
                     if tts_streamer:
@@ -1322,7 +1398,9 @@ async def send_message(conv_id: str, body: MsgCreate):
 
             # 将音乐点歌信息存入 attachments，刷新后可显示胶囊
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
-            att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else ""
+            full_text, image_atts = _extract_reply_image_attachments(full_text)
+            reply_atts = _dedupe_attachments(music_atts + image_atts)
+            att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()
             async with get_db() as db2:
@@ -1333,7 +1411,7 @@ async def send_message(conv_id: str, body: MsgCreate):
                 await db2.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now2, conv_id))
                 await db2.commit()
 
-            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": music_atts}
+            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts}
             await manager.broadcast({"type": "msg_created", "data": ai_msg})
             await export_conversation(conv_id)
 
@@ -1672,6 +1750,8 @@ async def perform_poi_check(conv_id: str, model_key: str, categories: list[str])
     try:
         _temp = SETTINGS.get("temperature")
         async for chunk in stream_ai(messages, model_key, temperature=_temp):
+            if chunk.startswith(CLI_STATUS_PREFIX):
+                continue
             full_text += chunk
             if poi_tts:
                 poi_tts.feed(chunk)
@@ -1787,6 +1867,8 @@ async def perform_activity_check(conv_id: str, model_key: str, n: int = 6):
     try:
         _temp = SETTINGS.get("temperature")
         async for chunk in stream_ai(messages, model_key, temperature=_temp):
+            if chunk.startswith(CLI_STATUS_PREFIX):
+                continue
             full_text += chunk
             if ac_tts:
                 ac_tts.feed(chunk)
@@ -1839,31 +1921,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         conv = await cur.fetchone()
         model_key = conv["model"] if conv else DEFAULT_MODEL
 
-        cur = await db.execute(
-            "SELECT role, content, attachments, created_at FROM messages WHERE conv_id=? AND role IN ('user','assistant','system') ORDER BY created_at DESC LIMIT ?",
-            (conv_id, context_limit)
-        )
-        rows = await cur.fetchall()
-        history = []
-        for r in reversed(rows):
-            d = dict(r)
-            # 过滤 system 消息：只保留点歌/查看监控相关的
-            if d["role"] == "system":
-                if not any(kw in d["content"] for kw in _SYSTEM_MSG_CONTEXT_KEYWORDS):
-                    continue
-                d["role"] = "user"
-                d["content"] = f"[系统事件] {d['content']}"
-                d["attachments"] = []
-                history.append(d)
-                continue
-            try: d["attachments"] = json.loads(d.get("attachments") or "[]") if d.get("attachments") else []
-            except: d["attachments"] = []
-            # 清洗消息中可能已有的 <meta> 标签（AI 模仿产生的），再附加系统时间戳
-            d["content"] = META_TAG_PATTERN.sub("", d["content"]).strip()
-            if d.get("created_at"):
-                dt = datetime.fromtimestamp(d["created_at"])
-                d["content"] = f"{d['content']}\n<meta>发送时间：{dt.month}月{dt.day}日 {dt.strftime('%H:%M')}</meta>"
-            history.append(d)
+    # ── 合并私聊 + 群聊消息为统一时间线 ──
+    merged = await fetch_merged_timeline("aion", context_limit, conv_id=conv_id)
+    history = render_merged_timeline(merged, "aion")
 
     # 只保留最后一条用户消息的图片附件 + 语音消息处理（与 send_message 一致）
     last_user_idx = -1
@@ -2046,6 +2106,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             await _q.put({"id": ai_msg_id, "type": "start"})
             try:
                 async for chunk in stream_ai(history, model_key, usage_meta, temperature, max_tokens=max_tokens, cancel_event=cancel_event):
+                    if chunk.startswith(CLI_STATUS_PREFIX):
+                        await _q.put({"type": "cli_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
+                        continue
                     full_text += chunk
                     await _q.put({"type": "chunk", "content": chunk})
                     if regen_tts:
@@ -2181,7 +2244,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
 
             # 将音乐点歌信息存入 attachments，刷新后可显示胶囊
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
-            att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else ""
+            full_text, image_atts = _extract_reply_image_attachments(full_text)
+            reply_atts = _dedupe_attachments(music_atts + image_atts)
+            att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()
             async with get_db() as db2:
@@ -2192,7 +2257,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 await db2.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now2, conv_id))
                 await db2.commit()
 
-            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": music_atts}
+            ai_msg = {"id": ai_msg_id, "conv_id": conv_id, "role": "assistant", "content": full_text, "created_at": now2, "attachments": reply_atts}
             await manager.broadcast({"type": "msg_created", "data": ai_msg})
             await export_conversation(conv_id)
 

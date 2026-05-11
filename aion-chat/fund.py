@@ -20,7 +20,7 @@ from config import (
 )
 from database import get_db
 from ws import manager
-from ai_providers import stream_ai
+from ai_providers import stream_ai, CLI_STATUS_PREFIX
 from tts import TTSStreamer
 
 log = logging.getLogger("fund")
@@ -374,6 +374,8 @@ async def run_fund_analysis(manual: bool = False):
     try:
         _temp = SETTINGS.get("temperature")
         async for chunk in stream_ai(messages, model_key, temperature=_temp):
+            if chunk.startswith(CLI_STATUS_PREFIX):
+                continue
             full_text += chunk
             if fund_tts:
                 fund_tts.feed(chunk)
