@@ -185,7 +185,7 @@
       </div>
       <div class="cam-section">
         <div class="cam-toggle-row">
-          <span class="cam-toggle-label">语音监听</span>
+          <span class="cam-toggle-label">语音监听 <span id="voiceStatus" style="font-size:11px;color:var(--text3);margin-left:6px">未开启</span></span>
           <label class="toggle-switch">
             <input type="checkbox" id="voiceToggle" onchange="toggleVoice()">
             <span class="toggle-slider"></span>
@@ -202,7 +202,6 @@
           <label>唤醒词</label>
           <input type="text" id="voiceWakeWord" value="老公" style="flex:1;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px;outline:none" onchange="updateVoiceWakeWord()">
         </div>
-        <div class="cam-status" id="voiceStatus">未开启</div>
       </div>
       <div class="cam-section">
         <div class="cam-toggle-row">
@@ -212,7 +211,6 @@
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div class="cam-status" id="videoCallStatus" style="font-size:11px;color:var(--text-secondary)">关闭后 AI 不会主动发起视频通话，但你仍可手动发起</div>
       </div>
       <div class="cam-section">
         <div class="cam-toggle-row">
@@ -222,7 +220,15 @@
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div class="cam-status" style="font-size:11px;color:var(--text-secondary)">开启后 AI 可通过 [SELFIE] / [DRAW] 指令生成图片</div>
+      </div>
+      <div class="cam-section">
+        <div class="cam-toggle-row">
+          <span class="cam-toggle-label">允许 Gemini CLI 调用工具</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="geminiCliToolsToggle" onchange="toggleGeminiCliTools()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
       </div>
     </div>
     <div class="context-bar" style="display:none">

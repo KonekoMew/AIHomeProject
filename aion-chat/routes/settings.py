@@ -108,6 +108,20 @@ async def update_image_gen_setting(body: ImageGenToggle):
     save_settings(SETTINGS)
     return {"ok": True, "image_gen_enabled": body.enabled}
 
+# ── Gemini CLI 工具调用开关 ─────────────────────────
+@router.get("/api/settings/gemini-cli-tools")
+async def get_gemini_cli_tools_setting():
+    return {"gemini_cli_tools_enabled": SETTINGS.get("gemini_cli_tools_enabled", False)}
+
+class GeminiCliToolsToggle(BaseModel):
+    enabled: bool
+
+@router.put("/api/settings/gemini-cli-tools")
+async def update_gemini_cli_tools_setting(body: GeminiCliToolsToggle):
+    SETTINGS["gemini_cli_tools_enabled"] = body.enabled
+    save_settings(SETTINGS)
+    return {"ok": True, "gemini_cli_tools_enabled": body.enabled}
+
 # ── 桌宠开关 ──────────────────────────────────────
 @router.get("/api/settings/pet")
 async def get_pet_setting():

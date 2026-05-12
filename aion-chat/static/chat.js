@@ -729,6 +729,25 @@ async function toggleImageGenEnabled() {
   } catch(e) {}
 })();
 
+// ── Gemini CLI 工具调用开关 ──
+async function toggleGeminiCliTools() {
+  const enabled = $('geminiCliToolsToggle').checked;
+  try {
+    await fetch('/api/settings/gemini-cli-tools', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ enabled })
+    });
+  } catch(e) { console.warn('保存 Gemini CLI 工具设置失败', e); }
+}
+(async function initGeminiCliToolsToggle() {
+  try {
+    const r = await fetch('/api/settings/gemini-cli-tools');
+    const d = await r.json();
+    $('geminiCliToolsToggle').checked = !!d.gemini_cli_tools_enabled;
+  } catch(e) {}
+})();
+
 // ── TTS 语音合成（服务端流式 TTS via WebSocket） ──
 let ttsEnabled = localStorage.getItem('aion_tts_enabled') === 'true';
 let ttsVoiceId = localStorage.getItem('aion_tts_voice') || '';
