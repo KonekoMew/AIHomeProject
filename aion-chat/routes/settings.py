@@ -11,7 +11,7 @@ from typing import Optional
 
 import httpx
 
-from config import SETTINGS, MODELS, save_settings, get_key, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR
+from config import SETTINGS, MODELS, save_settings, get_key, get_sentinel_config, load_worldbook, save_worldbook, load_chat_status, TTS_CACHE_DIR
 
 router = APIRouter()
 
@@ -27,6 +27,12 @@ class SettingsUpdate(BaseModel):
     gemini_free_key: Optional[str] = None
     aipro_key: Optional[str] = None
     netease_music_u: Optional[str] = None
+    sentinel_base_url: Optional[str] = None
+    sentinel_api_key: Optional[str] = None
+    sentinel_model: Optional[str] = None
+    embedding_base_url: Optional[str] = None
+    embedding_api_key: Optional[str] = None
+    embedding_model: Optional[str] = None
 
 @router.get("/api/settings")
 async def get_settings():
@@ -40,11 +46,19 @@ async def get_settings():
         "gemini_free_key": SETTINGS.get("gemini_free_key", ""),
         "aipro_key": SETTINGS.get("aipro_key", ""),
         "netease_music_u": SETTINGS.get("netease_music_u", ""),
+        "sentinel_base_url": SETTINGS.get("sentinel_base_url", ""),
+        "sentinel_api_key": SETTINGS.get("sentinel_api_key", ""),
+        "sentinel_model": SETTINGS.get("sentinel_model", ""),
+        "embedding_base_url": SETTINGS.get("embedding_base_url", ""),
+        "embedding_api_key": SETTINGS.get("embedding_api_key", ""),
+        "embedding_model": SETTINGS.get("embedding_model", ""),
         "gemini_key_masked": mask(SETTINGS.get("gemini_key", "")),
         "siliconflow_key_masked": mask(SETTINGS.get("siliconflow_key", "")),
         "gemini_free_key_masked": mask(SETTINGS.get("gemini_free_key", "")),
         "aipro_key_masked": mask(SETTINGS.get("aipro_key", "")),
         "netease_music_u_masked": mask(SETTINGS.get("netease_music_u", "")),
+        "sentinel_api_key_masked": mask(SETTINGS.get("sentinel_api_key", "")),
+        "embedding_api_key_masked": mask(SETTINGS.get("embedding_api_key", "")),
     }
 
 @router.put("/api/settings")
@@ -57,6 +71,18 @@ async def update_settings(body: SettingsUpdate):
         SETTINGS["gemini_free_key"] = body.gemini_free_key
     if body.aipro_key is not None:
         SETTINGS["aipro_key"] = body.aipro_key
+    if body.sentinel_base_url is not None:
+        SETTINGS["sentinel_base_url"] = body.sentinel_base_url
+    if body.sentinel_api_key is not None:
+        SETTINGS["sentinel_api_key"] = body.sentinel_api_key
+    if body.sentinel_model is not None:
+        SETTINGS["sentinel_model"] = body.sentinel_model
+    if body.embedding_base_url is not None:
+        SETTINGS["embedding_base_url"] = body.embedding_base_url
+    if body.embedding_api_key is not None:
+        SETTINGS["embedding_api_key"] = body.embedding_api_key
+    if body.embedding_model is not None:
+        SETTINGS["embedding_model"] = body.embedding_model
     if body.netease_music_u is not None:
         old_mu = SETTINGS.get("netease_music_u", "")
         SETTINGS["netease_music_u"] = body.netease_music_u

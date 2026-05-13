@@ -28,6 +28,7 @@ DRAW_CMD_PATTERN = re.compile(r'\[DRAW:\s*([^\]]+)\]')
 POI_SEARCH_PATTERN = re.compile(r'\[POI_SEARCH:([^\]]+)\]')
 TOY_CMD_PATTERN = re.compile(r'\[TOY:(\d|STOP)\]')
 PET_CMD_PATTERN = re.compile(r'\[PET:([a-z_\-]+)\]', re.IGNORECASE)
+TRANSFER_CMD_PATTERN = re.compile(r'\[转账[：:]\s*(-?\d+(?:\.\d+)?)\s*元\]')
 VIDEO_CALL_CMD = '[视频电话]'
 META_TAG_PATTERN = re.compile(r'\s*<meta>.*?</meta>', re.DOTALL)
 
@@ -36,6 +37,7 @@ _ALL_CMD_PATTERNS = [
     MUSIC_CMD_PATTERN, HEART_CMD_PATTERN, MEMORY_CMD_PATTERN,
     ACTIVITY_CHECK_PATTERN, SELFIE_CMD_PATTERN, DRAW_CMD_PATTERN,
     POI_SEARCH_PATTERN, TOY_CMD_PATTERN, PET_CMD_PATTERN,
+    TRANSFER_CMD_PATTERN,
 ]
 
 
@@ -149,6 +151,15 @@ async def build_ability_block(
         f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你"
         f"记住某件事的时候，可以用该指令录入记忆库。禁止滥用。"
     )
+    try:
+        from routes.wallet import _get_balance
+        wallet_bal = await _get_balance()
+        abilities.append(
+            f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。"
+            f"你的钱包当前余额：{wallet_bal:.2f}元。余额不足时不要转账。"
+        )
+    except Exception:
+        pass
 
     block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n"
     block += "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))

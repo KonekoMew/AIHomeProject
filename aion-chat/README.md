@@ -10,7 +10,7 @@
 - **语音**：WebRTC VAD 语音检测 + 硬基流动 ASR (SenseVoiceSmall) + TTS (CosyVoice2) + 语音消息（按住录制）
 - **AI 接口**：硬基流动（OpenAI 兼容）、Google Gemini（REST API）、AiPro 中转站（OpenAI 兼容）、Gemini CLI（本地子进程调用，免费 OAuth 认证）、Codex CLI（本地子进程调用，Connor 专用）
 - **AI 生图**：Gemini `gemini-3.1-flash-image-preview`（REST API generateContent，responseModalities=["IMAGE"]）
-- **Embedding**：Gemini `gemini-embedding-001`（3072维），余弦相似度检索
+- **Embedding**：Gemini `gemini-embedding-001`（3072维）或 OpenAI 兼容向量模型（如硅基流动 `Qwen/Qwen3-Embedding-8B` 4096维），余弦相似度检索，支持设置页自定义切换
 - **Android App**：Java，WebView + 前台推送服务（OkHttp 4.12.0 WebSocket）+ 原生录音桥 + 原生摄像头桥 + 原生视频录制桥（MediaCodec + MediaMuxer），compileSdk 34 / minSdk 24
 - **音乐**：pyncm（网易云音乐 API，搜索/歌曲详情/音频URL，支持 MUSIC_U Cookie VIP 登录 + 服务端代理推流）
 - **EPUB 解析**：ebooklib（EPUB 读取）+ BeautifulSoup4 / lxml（HTML 解析）
@@ -52,11 +52,11 @@
 ├── 启动壁纸.bat                  # Chrome App 模式无边框全屏启动动态壁纸
 └── aion-chat/
     ├── main.py                   # 入口：lifespan、路由注册、静态挂载、WebSocket、PWA 路由、自动记忆总结定时任务（私聊+群聊空闲检测）、Connor自动总结定时任务
-    ├── config.py                 # 全局路径、常量、settings/worldbook/chat_status/cam_config 读写
+    ├── config.py                 # 全局路径、常量、settings/worldbook/chat_status/cam_config 读写、哨兵模型配置(get_sentinel_config)、向量模型配置(get_embedding_config)
     ├── database.py               # SQLite 初始化（conversations/messages/memories/schedules/theater 等表 + 性能索引）
     ├── ws.py                     # WebSocket ConnectionManager 单例，含 tts_clients 状态追踪 + _tts_fallback HTTP 回落机制 + client_id 注册/定向推送
     ├── ai_providers.py           # AI 调用：硅基流动/Gemini/AiPro中转站/GeminiCLI 流式 + 非流式 + 多模态消息构建
-    ├── memory.py                 # 向量记忆：embedding、综合评分召回、手动/自动总结（合并私聊+群聊消息）、即时哨兵(RAG路由)、原文追溯
+    ├── memory.py                 # 向量记忆：embedding（Gemini/OpenAI兼容）、综合评分召回、手动/自动总结（合并私聊+群聊消息）、即时哨兵(RAG路由)、原文追溯、重建向量索引
     ├── camera.py                 # 摄像头：CameraMonitor 类、Sentinel 分析（注入设备活动摘要）、Core 唤醒、[CAM_CHECK]、ESP32-CAM 双摄切换+App桥接
     ├── location.py               # 高德地图定位：GPS心跳处理、三级研判、状态机(at_home/outside)、哨兵通知、POI搜索
     ├── voice.py                  # 语音唤醒 + 半双工通话（WebRTC VAD + 硬基流动 ASR），通话中自动携带 TTS 参数
@@ -88,6 +88,7 @@
     │   ├── ghost_forest.py       # 奥罗斯幽林 TRPG API（16 个端点：人设/会话/剧情生成/选择/骰子/大结局）+ SSE 流式 TTS
     │   ├── gift.py               # 礼物系统 API（pending/receive/list/delete/test）
     │   ├── fund.py               # 基金监控 API：持仓CRUD、配置开关、数据拉取、手动触发AI分析、缓存读取、历史走势
+    │   ├── wallet.py             # 钱包/转账 API：余额查询、交易记录、转账操作（复用 bookkeeping 表）
     │   ├── playground.py         # 娱乐室 API：MCP Server 连接/断开、tool calling 循环、SSE 流式行动日志、经历总结归档
     │   └── wallpaper.py          # 动态壁纸 API：文件列表/配置读写/上传/删除
     │   └── chatroom.py           # 聊天室 API：房间 CRUD、发消息(SSE)、AI 互聊(SSE)、记忆 CRUD、配置、Connor 状态、总结记忆、图片上传（/api/chatroom/upload）+ 图片路径重写 + TTS流式合成（Aion/Connor独立音色）
@@ -102,7 +103,7 @@
     │   ├── chat.js               # 主聊天页逻辑（从 chat.html 拆分）
     │   ├── common.css            # 子页面共享样式（CSS变量/布局/组件/闹铃弹窗/toast）
     │   ├── common.js             # 子页面共享工具（api()/WS连接/闹铃弹窗/系统通知）
-    │   ├── settings.html         # 设置页 → /settings（API Key 管理）
+    │   ├── settings.html         # 设置页 → /settings（API Key + 哨兵模型 + 向量模型配置）
     │   ├── worldbook.html        # 世界书页 → /worldbook（AI/用户人设编辑）
     │   ├── memory.html           # 记忆库页 → /memory（CRUD/搜索/总结/锚点/原文追溯）
     │   ├── schedule.html         # 日程管理页 → /schedule（列表/添加/删除）
@@ -128,7 +129,7 @@
     │   └── sw.js                 # PWA Service Worker（从 /sw.js 提供）
     └── data/                     # ★ 备份只需复制此文件夹
         ├── chat.db               # SQLite 数据库
-        ├── settings.json         # API Key 持久化
+        ├── settings.json         # API Key + 哨兵/向量模型配置持久化
         ├── worldbook.json        # 世界书（AI/用户人设+名称）
         ├── cam_config.json       # 摄像头监控配置（active_source/esp32_cam_url/本地摄像头/定时/静默时段）
         ├── chat_status.json      # 聊天状态摘要（供哨兵参考）
@@ -156,7 +157,7 @@
 |------|------|
 | `/` | home.html 手机风格主页（应用图标启动器） |
 | `/chat` | chat.html 主聊天页 |
-| `/settings` | settings.html 设置页（API Key 管理） |
+| `/settings` | settings.html 设置页（API Key + 哨兵/向量模型配置） |
 | `/worldbook` | worldbook.html 世界书页 |
 | `/memory` | memory.html 记忆库页 |
 | `/schedule` | schedule.html 日程管理页 |
@@ -188,7 +189,7 @@
 - Kimi-K2.5 → `Pro/moonshotai/Kimi-K2.5`
 
 ### Gemini（generativelanguage.googleapis.com）
-- gemini-3.1-flash-lite → `gemini-3.1-flash-lite-preview`（Sentinel / poll_digest 默认模型）
+- gemini-3.1-flash-lite → `gemini-3.1-flash-lite`（Sentinel / poll_digest 默认模型）
 - gemini-2.5-pro → `gemini-2.5-pro`
 - gemini-3-flash → `gemini-3-flash-preview`（聊天默认模型）
 - gemini-3.1-pro → `gemini-3.1-pro-preview`
@@ -197,13 +198,18 @@
 - claude-sonnet-4-6 → `claude-sonnet-4-6`
 - claude-opus-4-6 → `claude-opus-4-6`
 
-### 哨兵/向量模型（支持独立 Gemini Free Key）
-- Sentinel 哨兵分析 → `gemini-3.1-flash-lite-preview`
-- 向量 Embedding → `gemini-embedding-001`（3072维）
-- 即时哨兵 → `gemini-3.1-flash-lite-preview`
+### 哨兵/前置模型（支持自定义中转站）
+- Sentinel 哨兵分析 → 默认 `gemini-3.1-flash-lite`
+- 即时哨兵 → 默认 `gemini-3.1-flash-lite`
 - 记忆总结（手动/自动） → 当前聊天对话的核心模型（跟随用户选择）
+- 聊天室记忆总结 → Codex CLI（Connor 专用）
 
-哨兵和向量模型支持配置独立的 Gemini Free Key，留空则自动复用主 Gemini Key。
+哨兵/前置模型支持在设置页配置自定义 API 地址、API Key 和模型名（OpenAI 兼容格式，如硅基流动 `Qwen/Qwen3.6-35B-A3B`），留空则走 Gemini 官方 API + Gemini Free Key。自动禁用 thinking 模式以确保快速响应。
+
+### 向量模型（支持自定义中转站）
+- 向量 Embedding → 默认 Gemini `gemini-embedding-001`（3072维）
+
+向量模型同样支持自定义配置（如硅基流动 `Qwen/Qwen3-Embedding-8B` 4096维），切换后需在记忆库页点击「🔄 重建向量索引」重新生成向量（主记忆库 + 聊天室记忆库同时重建）。
 
 ## 已实现功能
 
@@ -541,7 +547,7 @@
    - **刷新级（refresh）**：调用高德逆地理编码 + 天气 API 更新地址/天气。条件：移动超过阈值 或 无缓存地址
    - **完整级（full）**：刷新 + 状态变更 + 哨兵通知。条件：home/outside 状态发生切换
 131. **状态机** — 三状态：`unknown` → `at_home` ↔ `outside`，基于与家坐标的 Haversine 距离判断（≤1000m 为 at_home），状态切换触发完整级处理
-132. **哨兵通知** — 状态变更时调用 `gemini-3.1-flash-lite-preview` 生成通知语，注入世界书人设 + 聊天状态 + 记忆召回 + 位置信息，作为 assistant 消息插入对话 + WebSocket 广播 + TTS
+132. **哨兵通知** — 状态变更时调用哨兵模型（默认 `gemini-3.1-flash-lite`，支持自定义中转站）生成通知语，注入世界书人设 + 聊天状态 + 记忆召回 + 位置信息，作为 assistant 消息插入对话 + WebSocket 广播 + TTS
 133. **逆地理编码** — 高德 Web 服务 API `/v3/geocode/regeo`，将 GCJ-02 坐标转换为结构化地址（省/市/区/街道/门牌号）
 134. **实时天气** — 高德天气 API `/v3/weather/weatherInfo`，根据逆地理编码返回的 `adcode` 查询实时天气（天气现象 + 温度 + 风力）
 135. **POI 周边搜索** — 高德 POI API `/v3/place/around`，以当前坐标为圆心 1000m 半径搜索指定类型 POI（如餐饮、超市）
@@ -1413,7 +1419,7 @@
 - **WGS84→GCJ-02 坐标转换**：`wgs84_to_gcj02()` 实现完整的国测局加密偏移算法（含 Krasovsky 椭球参数），中国境内坐标最大偏移约 500-700 米。Android 端不做转换，统一由服务端处理
 - **三级心跳研判**：`process_heartbeat` 维护 `last_api_lng/lat` 跟踪上次 API 调用的坐标，通过 Haversine 距离判断是否显著移动（≥`movement_threshold` 500m）。轻量级处理零 API 消耗，刷新级消耗 2 次 API（逆地理+天气），完整级额外消耗 1 次 AI 调用（哨兵通知）
 - **状态机防误触**：家坐标为 (0,0) 或未设置时保持 `unknown` 状态不做研判；每次心跳先算距离再判状态，状态切换必须经过完整级处理
-- **哨兵通知**：`_notify_sentinel()` 调用 `gemini-3.1-flash-lite-preview`，注入世界书人设 + `chat_status.json` 聊天状态 + 记忆召回 + 详细位置上下文（距离/地址/天气），生成自然语言通知消息
+- **哨兵通知**：`_notify_sentinel()` 调用哨兵模型（默认 `gemini-3.1-flash-lite`，支持自定义中转站），注入世界书人设 + `chat_status.json` 聊天状态 + 记忆召回 + 详细位置上下文（距离/地址/天气），生成自然语言通知消息
 - **POI 按需搜索**：`perform_poi_check()` 模式同 `perform_cam_check()`：异步执行，使用最新缓存坐标重新逆地理编码 + POI 搜索 → 构建 system 消息 → 调用 Core 生成跟进回复 → 插入对话 + WebSocket 广播
 - **Android 定位线程**：`AionPushService` 中 `startLocationThread()` 启动独立 Java Thread（非 HandlerThread），`Thread.sleep(10min)` 循环，每次先 GET `/api/location/config` 检查 `active` 字段，`active = enabled && !is_location_quiet_hours()`，false 时完全跳过 GPS 采集
 - **定位 UI**：chat.html 设置面板中「📍 定位追踪」为可折叠区块（默认收起），监控日志弹窗底部增加「📍 缓存定位」调试行（显示坐标/状态/地址/精度/更新时间）
@@ -1727,6 +1733,16 @@ python main.py
   → 点击画面任意位置 → 保存百分比坐标到 config.files[name].bubble_anchor
   → 实时更新气泡容器位置 → ESC/右键退出编辑模式
 ```
+
+### 钱包与转账（[转账：N元]）
+510. **转账功能** — 聊天输入栏「+」菜单中的「💰 转账」入口，弹出转账对话框（含金额输入），确认后向输入框插入 `[转账：N元]` 标签随消息发送
+511. **双向转账** — 支持正数（转账给对方）和负数（从钱包扣除），AI 也可在回复中使用 `[转账：N元]` 发起转账
+512. **微信风格转账卡片** — 消息中的 `[转账：N元]` 渲染为圆角卡片：正数为橙色（#f89b40）+ 双箭头图标 + 「发起了一笔转账」，负数为绿色（#4caf50）+ X 图标 + 「钱包扣除」
+513. **卡片独立显示** — 包含转账卡片的气泡自动去除背景/边框/阴影（CSS `:has(.transfer-card)` 规则），卡片视觉上独立于聊天气泡，像功能组件而非文字消息
+514. **钱包面板** — 侧栏底部「💰 钱包」按钮打开浮层面板，显示当前余额和交易记录列表（每笔显示方向、金额、时间、参与双方名称）
+515. **余额实时同步** — 转账操作后通过 WebSocket 广播 `wallet_update` 事件，钱包面板实时刷新；余额注入 AI prompt 的 `[系统能力]` 区块，AI 可感知当前余额
+516. **数据存储** — 复用 `bookkeeping` 表，`record_type` 为 `wallet_user`（用户发起）/ `wallet_ai`（AI 发起），存储金额、描述、参与方名称
+517. **TTS 过滤** — `[转账：N元]` 在 TTS 合成时自动剥除，不被语音朗读
 
 ## 注意事项
 - 搬迁目录后需修改 `一键启动.bat` 中的路径（第11行 `cd /d` 后面的绝对路径）

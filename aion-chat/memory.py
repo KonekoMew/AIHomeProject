@@ -2,12 +2,12 @@
 向量记忆库：embedding、recall、手动总结、即时哨兵（RAG 路由）
 """
 
-import json, time, struct, math
+import json, time, struct, math, asyncio
 from datetime import datetime
 
 import aiosqlite, httpx
 
-from config import get_key, load_worldbook, save_chat_status, load_digest_anchor, save_digest_anchor, DEFAULT_MODEL
+from config import get_key, get_sentinel_config, get_embedding_config, load_worldbook, save_chat_status, load_digest_anchor, save_digest_anchor, DEFAULT_MODEL
 from database import get_db
 from ws import manager
 
@@ -26,6 +26,8 @@ def _unpack_embedding(blob: bytes) -> list[float]:
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
+    if len(a) != len(b):
+        return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
@@ -35,18 +37,36 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 async def get_embedding(text: str) -> list[float] | None:
-    gemini_key = get_key("gemini_free")
-    if not gemini_key:
+    ecfg = get_embedding_config()
+    if not ecfg["api_key"]:
         return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{EMBEDDING_MODEL}:embedContent?key={gemini_key}"
-    body = {"content": {"parts": [{"text": text}]}}
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json=body)
-            resp.raise_for_status()
-            return resp.json()["embedding"]["values"]
-    except Exception:
-        return None
+    if ecfg["use_openai"]:
+        # OpenAI 兼容格式（硅基流动等）
+        url = f"{ecfg['base_url']}/v1/embeddings"
+        headers = {"Authorization": f"Bearer {ecfg['api_key']}", "Content-Type": "application/json"}
+        body = {"model": ecfg["model"], "input": text}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, json=body, headers=headers)
+                if resp.status_code != 200:
+                    print(f"[Embedding] OpenAI 兼容调用失败 {resp.status_code}: {resp.text[:300]}")
+                    return None
+                return resp.json()["data"][0]["embedding"]
+        except Exception as e:
+            print(f"[Embedding] 调用异常: {e}")
+            return None
+    else:
+        # Gemini 原生格式
+        model = ecfg["model"]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent?key={ecfg['api_key']}"
+        body = {"content": {"parts": [{"text": text}]}}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(url, json=body)
+                resp.raise_for_status()
+                return resp.json()["embedding"]["values"]
+        except Exception:
+            return None
 
 
 # ── 关键词匹配辅助 ──────────────────────
@@ -241,6 +261,85 @@ async def build_surfacing_memories(topic: str = "", keywords: list[str] = None,
     return result, surfaced_ids
 
 
+# ── 哨兵/前置模型统一调用 ────────────────────────
+async def _call_sentinel_text(scfg: dict, prompt: str, timeout: int = 60) -> str | None:
+    """统一调用哨兵模型（纯文本），支持 Gemini 原生和 OpenAI 兼容格式"""
+    if scfg["use_openai"]:
+        url = f"{scfg['base_url']}/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {scfg['api_key']}", "Content-Type": "application/json"}
+        payload = {
+            "model": scfg["model"],
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "enable_thinking": False,
+        }
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                print(f"[Sentinel] OpenAI 兼容调用失败 {resp.status_code}: {resp.text[:500]}")
+                raise Exception(f"Sentinel API {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+    else:
+        model = scfg["model"]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={scfg['api_key']}"
+        contents = [{"role": "user", "parts": [{"text": prompt}]}]
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json={"contents": contents, "safetySettings": safety_settings})
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
+async def _call_sentinel_vision(scfg: dict, prompt: str, img_b64: str, mime_type: str = "image/jpeg", timeout: int = 60) -> str | None:
+    """统一调用哨兵模型（带图片），支持 Gemini 原生和 OpenAI 兼容格式"""
+    if scfg["use_openai"]:
+        url = f"{scfg['base_url']}/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {scfg['api_key']}", "Content-Type": "application/json"}
+        payload = {
+            "model": scfg["model"],
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{img_b64}"}}
+            ]}],
+            "temperature": 0.3,
+            "max_tokens": 4096,
+            "enable_thinking": False,
+        }
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                print(f"[Sentinel] OpenAI 兼容 Vision 调用失败 {resp.status_code}: {resp.text[:500]}")
+                raise Exception(f"Sentinel Vision API {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+    else:
+        model = scfg["model"]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={scfg['api_key']}"
+        contents = [{"role": "user", "parts": [
+            {"text": prompt},
+            {"inline_data": {"mime_type": mime_type, "data": img_b64}}
+        ]}]
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(url, json={"contents": contents, "safetySettings": safety_settings})
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+
 # ── 即时哨兵：每次用户发消息后触发（RAG 路由） ────
 async def instant_digest(recent_messages: list[dict]) -> dict:
     """
@@ -248,7 +347,8 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
     {is_search_needed, keywords, require_detail, status}
     """
     gemini_key = get_key("gemini_free")
-    if not gemini_key or not recent_messages:
+    scfg = get_sentinel_config()
+    if not scfg["api_key"] or not recent_messages:
         return {"is_search_needed": False, "keywords": [], "require_detail": False, "status": "", "topic": ""}
 
     wb = load_worldbook()
@@ -279,22 +379,10 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
         f"对话：\n{messages_text}"
     )
 
-    model = "gemini-3.1-flash-lite-preview"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
-    contents = [{"role": "user", "parts": [{"text": prompt}]}]
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
-
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json={"contents": contents, "safetySettings": safety_settings})
-            resp.raise_for_status()
-            data = resp.json()
-            raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw = await _call_sentinel_text(scfg, prompt, timeout=15)
+        if not raw:
+            return {"is_search_needed": False, "keywords": [], "require_detail": False, "status": "", "topic": ""}
 
         # 提取 JSON（可能包裹在 ```json ... ``` 中）
         if "```" in raw:
@@ -356,25 +444,14 @@ def _split_into_groups(msgs: list, group_size: int = 30) -> list[list]:
 
 
 async def _call_flash_lite(prompt: str) -> dict | None:
-    """调用 flash-lite 模型，返回 JSON 结果（仅供即时哨兵使用）"""
-    gemini_key = get_key("gemini_free")
-    if not gemini_key:
+    """调用哨兵模型，返回 JSON 结果（仅供即时哨兵使用）"""
+    scfg = get_sentinel_config()
+    if not scfg["api_key"]:
         return None
-    model = "gemini-3.1-flash-lite-preview"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={gemini_key}"
-    contents = [{"role": "user", "parts": [{"text": prompt}]}]
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json={"contents": contents, "safetySettings": safety_settings})
-            resp.raise_for_status()
-            data = resp.json()
-            raw = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw = await _call_sentinel_text(scfg, prompt, timeout=60)
+        if not raw:
+            return None
         # 提取 JSON
         if "```" in raw:
             start = raw.find("{")
@@ -716,3 +793,53 @@ async def manual_digest() -> dict:
 async def auto_digest() -> dict:
     """自动定时记忆总结（至少 30 条未总结消息才执行）"""
     return await _do_digest(min_messages=30)
+
+
+async def rebuild_embeddings() -> dict:
+    """重建向量索引：用当前配置的 embedding 模型为所有记忆重新生成向量，不触发 AI 总结"""
+    success = 0
+    failed = 0
+    total = 0
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        # 主聊天记忆表
+        cur = await db.execute("SELECT id, content FROM memories ORDER BY id")
+        rows = await cur.fetchall()
+        total += len(rows)
+        for row in rows:
+            emb = await get_embedding(row["content"][:2000])
+            if emb:
+                await db.execute(
+                    "UPDATE memories SET embedding = ? WHERE id = ?",
+                    (_pack_embedding(emb), row["id"])
+                )
+                success += 1
+            else:
+                failed += 1
+            if success % 5 == 0:
+                await db.commit()
+                await asyncio.sleep(0.3)
+        await db.commit()
+        # 聊天室记忆表
+        try:
+            cur2 = await db.execute("SELECT id, content FROM chatroom_memories ORDER BY id")
+            cr_rows = await cur2.fetchall()
+            total += len(cr_rows)
+            for row in cr_rows:
+                emb = await get_embedding(row["content"][:2000])
+                if emb:
+                    await db.execute(
+                        "UPDATE chatroom_memories SET embedding = ? WHERE id = ?",
+                        (_pack_embedding(emb), row["id"])
+                    )
+                    success += 1
+                else:
+                    failed += 1
+                if success % 5 == 0:
+                    await db.commit()
+                    await asyncio.sleep(0.3)
+            await db.commit()
+        except Exception:
+            pass  # 聊天室记忆表可能不存在
+    print(f"[Memory] 向量索引重建完成: {success}/{total} 成功, {failed} 失败")
+    return {"total": total, "success": success, "failed": failed}

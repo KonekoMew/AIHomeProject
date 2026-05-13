@@ -25,6 +25,7 @@
       <button id="sysLogBtn" onclick="openSystemLog()">📋 系统日志</button>
       <button onclick="openWhisper()">💗 密语时刻</button>
       <button onclick="openStarredPanel()">⭐ 星标消息</button>
+      <button onclick="openWalletPanel()">💰 钱包</button>
       <button onclick="openSubPage('/')">🏠 返回主页</button>
     </div>
   </aside>
@@ -251,8 +252,7 @@
             <div class="plus-menu-item" onclick="closePlusMenu();$('fileInput').click()"><span class="pm-icon">📎</span>上传文件</div>
             <div class="plus-menu-item" onclick="closePlusMenu();openCamera()"><span class="pm-icon">📷</span>拍照</div>
             <div class="plus-menu-item" onclick="closePlusMenu();if(typeof videoCall!=='undefined')videoCall.userInitiate()"><span class="pm-icon">📹</span>视频通话</div>
-            <div class="plus-menu-item" onclick="closePlusMenu();toggleVoiceMode()"><span class="pm-icon">🎤</span>语音消息</div>
-          </div>
+            <div class="plus-menu-item" onclick="closePlusMenu();toggleVoiceMode()"><span class="pm-icon">🎤</span>语音消息</div>            <div class="plus-menu-item" onclick="closePlusMenu();openTransferDialog()"><span class="pm-icon">💰</span>转账</div>          </div>
         </div>
         <input type="file" id="fileInput" accept="image/*,video/*" multiple style="display:none" onchange="handleFileSelect(this)">
         <textarea id="input" rows="1" placeholder="输入消息..." onkeydown="handleKey(event)" oninput="autoResize(this); _updateSendBtnState()"></textarea>
@@ -276,6 +276,35 @@
   <iframe id="subPageFrame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"></iframe>
 </div>
 <script src="/static/chat.js"></script>
+
+<!-- ── 转账弹窗 ── -->
+<div class="transfer-dialog-overlay" id="transferDialogOverlay" onclick="closeTransferDialog()">
+  <div class="transfer-dialog" onclick="event.stopPropagation()">
+    <div class="transfer-dialog-title" id="transferDialogTitle">给【AI】转账</div>
+    <input type="number" id="transferAmountInput" class="transfer-amount-input" placeholder="输入金额" step="1">
+    <div class="transfer-dialog-hint">正数=转账，负数=扣除</div>
+    <div class="transfer-dialog-btns">
+      <button class="transfer-btn-cancel" onclick="closeTransferDialog()">取消</button>
+      <button class="transfer-btn-confirm" onclick="confirmTransfer()">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── 钱包悬浮面板 ── -->
+<div class="wallet-panel-overlay" id="walletPanelOverlay" onclick="closeWalletPanel()">
+  <div class="wallet-panel" onclick="event.stopPropagation()">
+    <div class="wallet-panel-header">
+      <span>💰 钱包</span>
+      <button class="wallet-close-btn" onclick="closeWalletPanel()">✕</button>
+    </div>
+    <div class="wallet-balance-section">
+      <div class="wallet-balance-label">当前余额</div>
+      <div class="wallet-balance-value" id="walletBalanceValue">¥0.00</div>
+    </div>
+    <div class="wallet-tx-header">转账记录</div>
+    <div class="wallet-tx-list" id="walletTxList"></div>
+  </div>
+</div>
 <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');</script>
 <script src="/static/video-call.js"></script>
 </body>

@@ -108,6 +108,7 @@
     <div class="digest-status" id="digestStatus" style="display:none"></div>
     <div class="btn-row">
       <button class="btn-digest" id="digestBtn" onclick="triggerDigest()">📝 总结新记忆</button>
+      <button class="btn-digest" id="rebuildBtn" onclick="rebuildEmbeddings()" style="background:#1565c0">🔄 重建向量索引</button>
     </div>
   </div>
 </div>
@@ -311,6 +312,29 @@ async function triggerDigest() {
     btn.disabled = false;
     btn.textContent = "📝 总结新记忆";
     setTimeout(() => { statusEl.style.display = "none"; }, 5000);
+  }
+}
+
+async function rebuildEmbeddings() {
+  const btn = $("rebuildBtn");
+  const statusEl = $("digestStatus");
+  if (!confirm("将用当前配置的向量模型为所有记忆重新生成向量索引，原有向量会被覆盖。确认继续？")) return;
+  btn.disabled = true;
+  btn.textContent = "⏳ 重建中...";
+  statusEl.style.display = "block";
+  statusEl.className = "digest-status info";
+  statusEl.textContent = "正在重建向量索引，请稍候...";
+  try {
+    const result = await api("POST", "/api/memories/rebuild-embeddings");
+    statusEl.className = "digest-status success";
+    statusEl.textContent = `向量索引重建完成：${result.success}/${result.total} 条成功` + (result.failed > 0 ? `，${result.failed} 条失败` : "");
+  } catch(e) {
+    statusEl.className = "digest-status error";
+    statusEl.textContent = "重建失败：" + (e.message || "未知错误");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🔄 重建向量索引";
+    setTimeout(() => { statusEl.style.display = "none"; }, 8000);
   }
 }
 

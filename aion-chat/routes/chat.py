@@ -28,6 +28,7 @@ MEMORY_CMD_PATTERN = re.compile(r'\[MEMORY:([^\]]+)\]')
 ACTIVITY_CHECK_PATTERN = re.compile(r'\[查看动态:(\d+)\]')
 SELFIE_CMD_PATTERN = re.compile(r'\[SELFIE:\s*([^\]]+)\]')
 DRAW_CMD_PATTERN = re.compile(r'\[DRAW:\s*([^\]]+)\]')
+TRANSFER_CMD_PATTERN = re.compile(r'\[转账[：:]\s*(-?\d+(?:\.\d+)?)\s*元\]')
 
 # ── 活跃生成任务（用于 abort 取消） ──
 active_generations: dict[str, asyncio.Event] = {}  # conv_id → cancel_event
@@ -632,6 +633,12 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(贴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
     abilities.append(f"[HEART:朋友圈内容] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时才触发，禁止滥用。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
+    try:
+        from routes.wallet import _get_balance
+        _wb = await _get_balance()
+        abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
+    except Exception:
+        pass
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
     # CLI 模型专属：告知图片存储目录，使其能保存图片并返回路径
@@ -861,6 +868,27 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
 
             full_text = META_TAG_PATTERN.sub("", full_text).strip()
 
+            # 检测 [转账：N元] 指令 — AI 转账入账（不从 full_text 中剥离，前端渲染卡片需要）
+            transfer_matches = TRANSFER_CMD_PATTERN.findall(full_text)
+            for t_amount_str in transfer_matches:
+                try:
+                    t_val = float(t_amount_str)
+                    if t_val > 0:
+                        _a_n = wb.get('ai_name', 'AI')
+                        _u_n = wb.get('user_name', '用户')
+                        async with get_db() as t_db:
+                            t_now = time.time()
+                            t_id = f"wt_{int(t_now*1000)}"
+                            await t_db.execute(
+                                "INSERT INTO bookkeeping (id, record_type, amount, description, created_at) VALUES (?,?,?,?,?)",
+                                (t_id, 'wallet_ai', -t_val, f'{_a_n}转账给{_u_n} {t_val}元', t_now)
+                            )
+                            await t_db.commit()
+                        await manager.broadcast({"type": "wallet_update"})
+                        print(f"[WALLET] AI 转账: -{t_val}元")
+                except (ValueError, Exception):
+                    pass
+
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
             full_text, image_atts = _extract_reply_image_attachments(full_text)
             reply_atts = _dedupe_attachments(music_atts + image_atts)
@@ -990,6 +1018,27 @@ async def send_message(conv_id: str, body: MsgCreate):
                 "created_at": now, "attachments": body.attachments}
     await manager.broadcast({"type": "msg_created", "data": user_msg})
 
+    # 检测用户消息中的 [转账：N元] → 入账
+    user_transfer_matches = TRANSFER_CMD_PATTERN.findall(body.content)
+    for t_amount_str in user_transfer_matches:
+        try:
+            t_val = float(t_amount_str)
+            _wb_t = load_worldbook()
+            _u_name = _wb_t.get('user_name', '用户')
+            _a_name = _wb_t.get('ai_name', 'AI')
+            async with get_db() as t_db:
+                t_now = time.time()
+                t_id = f"wt_{int(t_now*1000)}"
+                await t_db.execute(
+                    "INSERT INTO bookkeeping (id, record_type, amount, description, created_at) VALUES (?,?,?,?,?)",
+                    (t_id, 'wallet_user', t_val, f'{_u_name}转账 {t_val}元', t_now)
+                )
+                await t_db.commit()
+            await manager.broadcast({"type": "wallet_update"})
+            print(f"[WALLET] 用户转账: {t_val}元")
+        except (ValueError, Exception):
+            pass
+
     async with get_db() as db:
         db.row_factory = __import__('aiosqlite').Row
         cur = await db.execute("SELECT model FROM conversations WHERE id=?", (conv_id,))
@@ -1061,6 +1110,12 @@ async def send_message(conv_id: str, body: MsgCreate):
         abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(趴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
     abilities.append(f"[HEART:朋友圈内容] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时才触发，禁止滥用。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
+    try:
+        from routes.wallet import _get_balance
+        _wb = await _get_balance()
+        abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
+    except Exception:
+        pass
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
     # CLI 模型专属：告知图片存储目录
@@ -1363,6 +1418,27 @@ async def send_message(conv_id: str, body: MsgCreate):
                         await manager.broadcast({"type": "memory_record", "data": mr_data})
                         print(f"[MEMORY] AI 主动录入记忆: {mem_content[:50]}")
 
+
+            # 检测 [转账：N元] 指令 — AI 转账入账
+            transfer_matches = TRANSFER_CMD_PATTERN.findall(full_text)
+            for t_amount_str in transfer_matches:
+                try:
+                    t_val = float(t_amount_str)
+                    if t_val > 0:
+                        _a_n = wb.get('ai_name', 'AI')
+                        _u_n = wb.get('user_name', '用户')
+                        async with get_db() as t_db:
+                            t_now = time.time()
+                            t_id = f"wt_{int(t_now*1000)}"
+                            await t_db.execute(
+                                "INSERT INTO bookkeeping (id, record_type, amount, description, created_at) VALUES (?,?,?,?,?)",
+                                (t_id, 'wallet_ai', -t_val, f'{_a_n}转账给{_u_n} {t_val}元', t_now)
+                            )
+                            await t_db.commit()
+                        await manager.broadcast({"type": "wallet_update"})
+                        print(f"[WALLET] AI 转账: -{t_val}元")
+                except (ValueError, Exception):
+                    pass
 
             # 检测剧场指令 [剧场属性：xxx ±N] / [剧场道具：xxx]
             theater_updates = []
@@ -1997,6 +2073,12 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(趴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
     abilities.append(f"[HEART:朋友圈内容] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时才触发，禁止滥用。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
+    try:
+        from routes.wallet import _get_balance
+        _wb = await _get_balance()
+        abilities.append(f"[转账：n元] — 给{user_name}转账（n为正整数），会从你的钱包余额中扣除。你的钱包当前余额：{_wb:.2f}元。余额不足时不要转账。")
+    except Exception:
+        pass
     ability_block = "[系统能力] 你可以在回复中根据对话氛围，善用以下指令：\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(abilities))
     ability_block += "\n\n<meta>标签内为消息元数据，不是对话内容的一部分，你的回复中不要包含任何<meta>标签或时间信息。"
     # CLI 模型专属：告知图片存储目录
@@ -2253,6 +2335,27 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                         await _q.put(mr_data)
                         await manager.broadcast({"type": "memory_record", "data": mr_data})
                         print(f"[MEMORY] AI 主动录入记忆: {mem_content[:50]}")
+
+            # 检测 [转账：N元] 指令 — AI 转账入账
+            transfer_matches = TRANSFER_CMD_PATTERN.findall(full_text)
+            for t_amount_str in transfer_matches:
+                try:
+                    t_val = float(t_amount_str)
+                    if t_val > 0:
+                        _a_n = wb.get('ai_name', 'AI')
+                        _u_n = wb.get('user_name', '用户')
+                        async with get_db() as t_db:
+                            t_now = time.time()
+                            t_id = f"wt_{int(t_now*1000)}"
+                            await t_db.execute(
+                                "INSERT INTO bookkeeping (id, record_type, amount, description, created_at) VALUES (?,?,?,?,?)",
+                                (t_id, 'wallet_ai', -t_val, f'{_a_n}转账给{_u_n} {t_val}元', t_now)
+                            )
+                            await t_db.commit()
+                        await manager.broadcast({"type": "wallet_update"})
+                        print(f"[WALLET] AI 转账: -{t_val}元")
+                except (ValueError, Exception):
+                    pass
 
             # 清洗 AI 回复中模仿产生的 <meta> 标签
             full_text = META_TAG_PATTERN.sub("", full_text).strip()

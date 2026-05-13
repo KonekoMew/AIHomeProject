@@ -9,7 +9,7 @@ import cv2, httpx, numpy as np, aiosqlite
 
 from config import (
     DB_PATH, SCREENSHOTS_DIR, MONITOR_LOGS_DIR,
-    get_key, load_worldbook, load_chat_status, load_cam_config, save_cam_config, DEFAULT_MODEL, SETTINGS,
+    get_key, get_sentinel_config, load_worldbook, load_chat_status, load_cam_config, save_cam_config, DEFAULT_MODEL, SETTINGS,
 )
 from database import get_db
 from ws import manager
@@ -746,37 +746,22 @@ call_core判断依据：
 - 结合设备活动动态综合判断：根据上下文分析，如果动态显示{user_name}不符合上下文讨论到的内容，例如：说去睡觉了，却在刷抖音小红书。说去工作了，却在浏览不相干的内容，进行评估，自行决定是否向Core报告情况。"""
 
         img_b64 = base64.b64encode(filepath.read_bytes()).decode()
-        sentinel_model = "gemini-3.1-flash-lite-preview"
-        gemini_key = get_key("gemini_free")
-        if not gemini_key:
-            print("[Monitor] Gemini API Key 未配置，跳过分析")
+        scfg = get_sentinel_config()
+        if not scfg["api_key"]:
+            print("[Monitor] 哨兵模型 API Key 未配置，跳过分析")
             return
 
-        contents = [{"role": "user", "parts": [
-            {"text": prompt},
-            {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-        ]}]
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{sentinel_model}:generateContent?key={gemini_key}"
-        payload = {"contents": contents, "safetySettings": [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]}
-        print(f"[Monitor] 正在调用 Sentinel 模型: {sentinel_model}")
+        sentinel_model = scfg["model"]
+        print(f"[Monitor] 正在调用 Sentinel 模型: {sentinel_model} ({'OpenAI兼容' if scfg['use_openai'] else 'Gemini'})")
 
         monitoring_log = ""
         call_core = False
 
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            from memory import _call_sentinel_vision
+            raw_text = await _call_sentinel_vision(scfg, prompt, img_b64, timeout=60)
 
-            cleaned = raw_text.strip()
+            cleaned = raw_text.strip() if raw_text else ""
             if cleaned.startswith("```"):
                 cleaned = re.sub(r"^```\w*\n?", "", cleaned)
                 cleaned = re.sub(r"\n?```$", "", cleaned)
@@ -787,7 +772,7 @@ call_core判断依据：
             summary = parsed.get("summary", "")
             core_reason = parsed.get("core_reason", "")
         except json.JSONDecodeError:
-            monitoring_log = raw_text.strip() if 'raw_text' in dir() else "[Sentinel 无响应]"
+            monitoring_log = raw_text.strip() if raw_text else "[Sentinel 无响应]"
             summary = ""
             core_reason = ""
         except Exception as e:

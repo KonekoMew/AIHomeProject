@@ -108,15 +108,32 @@ function escHtml(s) { const d = document.createElement("div"); d.textContent = s
 function formatMsg(s) {
   // 先转义 HTML，再将 [[image:path]] 标记渲染为 <img>
   const escaped = escHtml(s);
+  // 渲染 [转账：N元] 为微信风格卡片
+  const transferRe = /\[\u8f6c\u8d26[\uff1a:]\s*(-?\d+(?:\.\d+)?)\s*\u5143\]/g;
+  const aiName = (worldBook && worldBook.ai_name) || 'AI';
+  const userName = (worldBook && worldBook.user_name) || '你';
+  let processed = escaped.replace(transferRe, (match, amount) => {
+    const val = parseFloat(amount);
+    const isNeg = val < 0;
+    const absVal = Math.abs(val);
+    if (isNeg) {
+      // 负数 = 钱包扣除
+      return `<div class="transfer-card deduct"><div class="transfer-card-icon-wrap"><svg viewBox="0 0 40 40" width="28" height="28"><circle cx="20" cy="20" r="18" fill="none" stroke="#fff" stroke-width="2.5"/><line x1="14" y1="14" x2="26" y2="26" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/><line x1="26" y1="14" x2="14" y2="26" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg></div><div class="transfer-card-body"><div class="transfer-card-amount">¥${absVal}</div><div class="transfer-card-desc">钱包扣除</div></div><div class="transfer-card-footer">扣除</div></div>`;
+    } else {
+      // 正数 = 转账
+      return `<div class="transfer-card"><div class="transfer-card-icon-wrap"><svg viewBox="0 0 40 40" width="28" height="28"><circle cx="20" cy="20" r="18" fill="none" stroke="#fff" stroke-width="2.5"/><path d="M12 17h12M24 17l-3-3" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M28 23H16M16 23l3 3" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></div><div class="transfer-card-body"><div class="transfer-card-amount">¥${absVal}</div><div class="transfer-card-desc">发起了一笔转账</div></div><div class="transfer-card-footer">转账</div></div>`;
+    }
+  });
+  // 渲染 [[image:path]]
   const imgRe = /\[\[image:(\S+?)\]\]/g;
   let result = '', lastIdx = 0, match;
-  while ((match = imgRe.exec(escaped)) !== null) {
-    result += escaped.slice(lastIdx, match.index).replace(/\n/g, '<br>');
+  while ((match = imgRe.exec(processed)) !== null) {
+    result += processed.slice(lastIdx, match.index).replace(/\n/g, '<br>');
     const safeUrl = match[1];
     result += `<img class="cr-inline-img" src="${safeUrl}" onclick="openImageViewer && openImageViewer(this.src)" loading="lazy" style="max-width:100%;border-radius:8px;cursor:pointer;margin:4px 0">`;
     lastIdx = imgRe.lastIndex;
   }
-  result += escaped.slice(lastIdx).replace(/\n/g, '<br>');
+  result += processed.slice(lastIdx).replace(/\n/g, '<br>');
   return result;
 }
 
@@ -1169,6 +1186,9 @@ function handleSync(msg) {
   } else if (type === "gift_pending") {
     // 礼物通知
     _showGiftPopup(data);
+  } else if (type === "wallet_update") {
+    // 钱包余额变动 → 如果钱包面板打开则刷新
+    if ($('walletPanelOverlay').classList.contains('show')) openWalletPanel();
   }
 }
 
@@ -1240,7 +1260,9 @@ function renderMessages() {
     const dotsRight = !isUser ? `<button class="msg-dots" onclick="event.stopPropagation();toggleMsgMenu('${m.id}')">&#8943;</button>` : '';
     const displayContent = isUser ? m.content : m.content.replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
     const hasVoiceAtt = m.attachments && m.attachments.some(a => typeof a === 'object' && (a.type === 'voice' || a.type === 'video_clip'));
-    const parts = isUser ? displayContent.split(/\n+/).filter(p => p.trim()) : displayContent.split(/\n{2,}/).filter(p => p.trim());
+    // 转账标签前后强制换行，确保卡片独占一个气泡
+    const splitContent = displayContent.replace(/(\[转账[：:]\s*-?\d+(?:\.\d+)?\s*元\])/g, '\n$1\n');
+    const parts = (isUser ? splitContent.split(/\n+/) : splitContent.split(/\n+/)).filter(p => p.trim());
     let bubblesHtml;
     if (hasVoiceAtt && !displayContent.trim()) {
       // 纯语音消息：不显示文本气泡，只显示语音气泡
@@ -3838,3 +3860,63 @@ function closeSubPage() {
 window.addEventListener('popstate', function(e) {
   if ($('subPageOverlay').classList.contains('show')) { closeSubPage(); }
 });
+
+// ── 转账弹窗 ──
+function openTransferDialog() {
+  const aiName = (worldBook && worldBook.ai_name) || 'AI';
+  $('transferDialogTitle').textContent = `给【${aiName}】转账`;
+  $('transferAmountInput').value = '';
+  $('transferDialogOverlay').classList.add('show');
+  setTimeout(() => $('transferAmountInput').focus(), 100);
+}
+function closeTransferDialog() {
+  $('transferDialogOverlay').classList.remove('show');
+}
+function confirmTransfer() {
+  const val = $('transferAmountInput').value.trim();
+  if (!val || isNaN(Number(val)) || Number(val) === 0) return;
+  const n = Number(val);
+  const tag = `[转账：${n}元]`;
+  const input = $('input');
+  const cur = input.value;
+  input.value = cur ? cur + ' ' + tag : tag;
+  autoResize(input);
+  _updateSendBtnState();
+  closeTransferDialog();
+  input.focus();
+}
+
+// ── 钱包面板 ──
+async function openWalletPanel() {
+  $('walletPanelOverlay').classList.add('show');
+  closeSidebar();
+  try {
+    const [balRes, txRes] = await Promise.all([
+      api('GET', '/api/wallet/balance'),
+      api('GET', '/api/wallet/transactions?limit=50')
+    ]);
+    $('walletBalanceValue').textContent = `¥${(balRes.balance || 0).toFixed(2)}`;
+    const list = $('walletTxList');
+    if (!txRes || txRes.length === 0) {
+      list.innerHTML = '<div class="wallet-tx-empty">暂无转账记录</div>';
+    } else {
+      list.innerHTML = txRes.map(tx => {
+        const isAi = tx.record_type === 'wallet_ai';
+        const d = new Date(tx.created_at * 1000);
+        const timeStr = `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+        const sign = tx.amount >= 0 ? '+' : '';
+        const cls = tx.amount >= 0 ? 'positive' : 'negative';
+        const aName = (worldBook && worldBook.ai_name) || 'AI';
+        const uName = (worldBook && worldBook.user_name) || '用户';
+        let desc = tx.description || (isAi ? `${aName}转账` : `${uName}转账`);
+        desc = desc.replace(/AI转账给用户/g, `${aName}转账给${uName}`).replace(/用户转账/g, `${uName}转账`);
+        return `<div class="wallet-tx-item"><div><div class="wallet-tx-desc">${escHtml(desc)}</div><div class="wallet-tx-time">${timeStr}</div></div><div class="wallet-tx-amount ${cls}">${sign}${tx.amount.toFixed(2)}</div></div>`;
+      }).join('');
+    }
+  } catch(e) {
+    $('walletTxList').innerHTML = '<div class="wallet-tx-empty">加载失败</div>';
+  }
+}
+function closeWalletPanel() {
+  $('walletPanelOverlay').classList.remove('show');
+}

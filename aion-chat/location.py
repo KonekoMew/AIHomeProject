@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx, aiosqlite
 
 from config import (
-    DATA_DIR, SETTINGS, get_key,
+    DATA_DIR, SETTINGS, get_key, get_sentinel_config,
     load_worldbook, load_chat_status, save_chat_status,
 )
 from database import get_db
@@ -629,9 +629,9 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
     ai_name = wb.get("ai_name", "AI")
     now_str = time.strftime("%Y年%m月%d日 %H:%M:%S")
 
-    gemini_key = get_key("gemini_free")
-    if not gemini_key:
-        print("[Location] Gemini API Key 未配置，跳过哨兵通知")
+    scfg = get_sentinel_config()
+    if not scfg["api_key"]:
+        print("[Location] 哨兵模型 API Key 未配置，跳过哨兵通知")
         return
 
     last_user_ts = await async_get_last_user_msg_time()
@@ -701,28 +701,15 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
 请严格按照以下JSON格式回复，不要包含其他内容：
 {{"monitoringlog":"位置变化事件记录，例如：检测到{user_name}离开了家，当前位于XX。","call_core":false,"core_reason":""}}"""
 
-    sentinel_model = "gemini-3.1-flash-lite-preview"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{sentinel_model}:generateContent?key={gemini_key}"
-    contents = [{"role": "user", "parts": [{"text": prompt}]}]
-    payload = {"contents": contents, "safetySettings": [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]}
-
     monitoring_log = event_desc
     call_core = False
     core_reason = ""
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+        from memory import _call_sentinel_text
+        raw_text = await _call_sentinel_text(scfg, prompt, timeout=60)
 
-        cleaned = raw_text.strip()
+        cleaned = raw_text.strip() if raw_text else ""
         if cleaned.startswith("```"):
             cleaned = re.sub(r"^```\w*\n?", "", cleaned)
             cleaned = re.sub(r"\n?```$", "", cleaned)

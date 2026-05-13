@@ -10,7 +10,7 @@ from typing import Optional
 
 from database import get_db
 from ws import manager
-from memory import get_embedding, _pack_embedding, manual_digest
+from memory import get_embedding, _pack_embedding, manual_digest, rebuild_embeddings
 from config import load_digest_anchor, save_digest_anchor
 
 router = APIRouter()
@@ -118,6 +118,12 @@ async def get_memories_by_conv(conv_id: str):
 async def trigger_digest():
     """手动触发记忆总结"""
     result = await manual_digest()
+    return result
+
+@router.post("/api/memories/rebuild-embeddings")
+async def trigger_rebuild_embeddings():
+    """重建向量索引：用当前 embedding 模型为所有记忆重新生成向量"""
+    result = await rebuild_embeddings()
     return result
 
 @router.get("/api/memories/digest/anchor")

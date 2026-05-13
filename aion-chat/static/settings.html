@@ -20,6 +20,29 @@
     <input class="form-input" type="text" id="geminiKeyInput" placeholder="输入 Gemini API Key..." autocomplete="off" style="font-family:monospace">
     <label class="form-label">Gemini Free Key（哨兵+向量）</label>
     <input class="form-input" type="text" id="geminiFreeKeyInput" placeholder="留空则复用上方 Key" autocomplete="off" style="font-family:monospace">
+
+    <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
+      <label class="form-label" style="font-size:15px;color:#ff8359">🛡 前置 & 哨兵模型（自定义中转站）</label>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">留空则默认走 Gemini 官方 API + 上方 Free Key</p>
+      <label class="form-label">API 地址（Base URL）</label>
+      <input class="form-input" type="text" id="sentinelBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off" style="font-family:monospace">
+      <label class="form-label">API Key</label>
+      <input class="form-input" type="text" id="sentinelApiKeyInput" placeholder="中转站 / 硅基流动的 API Key" autocomplete="off" style="font-family:monospace">
+      <label class="form-label">模型名称</label>
+      <input class="form-input" type="text" id="sentinelModelInput" placeholder="例：Qwen/Qwen3.6-35B-A3B" autocomplete="off" style="font-family:monospace">
+    </div>
+
+    <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
+      <label class="form-label" style="font-size:15px;color:#ff8359">📐 向量模型（记忆库 Embedding）</label>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">留空则默认走 Gemini embedding-001。切换模型后维度可能不同，需重建向量（记忆库→手动总结）</p>
+      <label class="form-label">API 地址（Base URL）</label>
+      <input class="form-input" type="text" id="embeddingBaseUrlInput" placeholder="例：https://api.siliconflow.cn" autocomplete="off" style="font-family:monospace">
+      <label class="form-label">API Key</label>
+      <input class="form-input" type="text" id="embeddingApiKeyInput" placeholder="留空则复用 Gemini Free Key" autocomplete="off" style="font-family:monospace">
+      <label class="form-label">模型名称</label>
+      <input class="form-input" type="text" id="embeddingModelInput" placeholder="例：Qwen/Qwen3-Embedding-8B" autocomplete="off" style="font-family:monospace">
+    </div>
+
     <label class="form-label">硅基流动 API Key</label>
     <input class="form-input" type="text" id="sfKeyInput" placeholder="输入硅基流动 API Key..." autocomplete="off" style="font-family:monospace">
     <label class="form-label">中转站 API Key</label>
@@ -40,6 +63,12 @@ connectCommonWS();
   const s = await api("GET", "/api/settings");
   $("geminiKeyInput").value = s.gemini_key || "";
   $("geminiFreeKeyInput").value = s.gemini_free_key || "";
+  $("sentinelBaseUrlInput").value = s.sentinel_base_url || "";
+  $("sentinelApiKeyInput").value = s.sentinel_api_key || "";
+  $("sentinelModelInput").value = s.sentinel_model || "";
+  $("embeddingBaseUrlInput").value = s.embedding_base_url || "";
+  $("embeddingApiKeyInput").value = s.embedding_api_key || "";
+  $("embeddingModelInput").value = s.embedding_model || "";
   $("sfKeyInput").value = s.siliconflow_key || "";
   $("aiproKeyInput").value = s.aipro_key || "";
   $("neteaseMusicUInput").value = s.netease_music_u || "";
@@ -49,6 +78,12 @@ async function saveSettings() {
   await api("PUT", "/api/settings", {
     gemini_key: $("geminiKeyInput").value.trim(),
     gemini_free_key: $("geminiFreeKeyInput").value.trim(),
+    sentinel_base_url: $("sentinelBaseUrlInput").value.trim(),
+    sentinel_api_key: $("sentinelApiKeyInput").value.trim(),
+    sentinel_model: $("sentinelModelInput").value.trim(),
+    embedding_base_url: $("embeddingBaseUrlInput").value.trim(),
+    embedding_api_key: $("embeddingApiKeyInput").value.trim(),
+    embedding_model: $("embeddingModelInput").value.trim(),
     siliconflow_key: $("sfKeyInput").value.trim(),
     aipro_key: $("aiproKeyInput").value.trim(),
     netease_music_u: $("neteaseMusicUInput").value.trim()
