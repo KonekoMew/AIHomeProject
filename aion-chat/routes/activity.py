@@ -159,13 +159,20 @@ def _timeline_item(ts: float, kind: str, actor: str, title: str, detail: str = "
     }
 
 
-def _idle_event_timeline_title(row, shown_diary_ids: set[str], shown_moment_ids: set[str]) -> Optional[str]:
+def _idle_event_timeline_title(row, actor: str, shown_diary_ids: set[str], shown_moment_ids: set[str]) -> Optional[str]:
     action = str(row["action"] or "")
     result_type = str(row["result_type"] or "")
     result_id = str(row["result_id"] or "")
+    try:
+        meta = json.loads(row["metadata"] or "{}")
+    except Exception:
+        meta = {}
 
     if action == "select":
         return None
+    if action == "seeky_interaction":
+        phrase = SEEKY_EVENT_PHRASES.get(str(meta.get("seeky_action") or ""))
+        return f"{actor}对Seeky{phrase}" if phrase else row["title"]
     if action == "home_dynamics_result":
         return None
     if action.endswith("_result") and result_type == "message":
@@ -177,7 +184,7 @@ def _idle_event_timeline_title(row, shown_diary_ids: set[str], shown_moment_ids:
             return None
         if result_type not in ("diary", "moment"):
             return None
-    if action not in ("home_dynamics", "memory_browse", "memory_browse_result"):
+    if action not in ("home_dynamics", "memory_browse", "memory_browse_result", "seeky_interaction"):
         return None
     return row["title"]
 
@@ -243,7 +250,7 @@ async def get_timeline(hours: int = 24, limit: int = 300):
         )
         for r in await cur.fetchall():
             actor = _actor_name(r["actor"], names)
-            title = _idle_event_timeline_title(r, shown_diary_ids, shown_moment_ids)
+            title = _idle_event_timeline_title(r, actor, shown_diary_ids, shown_moment_ids)
             if not title:
                 continue
             items.append(_timeline_item(

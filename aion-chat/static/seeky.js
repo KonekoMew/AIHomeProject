@@ -455,6 +455,15 @@ function seekyMessageName(role) {
   return petName();
 }
 
+function normalizeSeekyMessageRole(msg) {
+  const role = msg?.role || 'assistant';
+  if (role !== 'user') return role;
+  const content = (msg?.content || '').trim();
+  if (/^\[(aion|aions?|ai\s*on|AIon)[^\]]*\]/i.test(content)) return 'aion';
+  if (/^\[(connor)[^\]]*\]/i.test(content)) return 'connor';
+  return role;
+}
+
 function seekyMessageSide(role) {
   return role === 'user' ? 'user' : 'seeky';
 }
@@ -464,7 +473,7 @@ function mainChatItems() {
     .filter(msg => (msg.content || '').trim())
     .map(msg => ({
       id: msg.id,
-      role: msg.role || 'assistant',
+      role: normalizeSeekyMessageRole(msg),
       content: msg.content,
       created_at: Number(msg.created_at || 0) * 1000,
     }));
@@ -567,19 +576,21 @@ function renderMainChatItem(item) {
     return `<div class="pet-chat-row event"><div class="pet-event-chip">${esc(item.content)}</div></div>`;
   }
   const isUser = item.role === 'user';
+  const isActor = item.role === 'aion' || item.role === 'connor';
   const name = seekyMessageName(item.role);
   const side = seekyMessageSide(item.role);
   return `
-    <div class="pet-chat-row ${side} ${isUser ? '' : 'actor'}">
+    <div class="pet-chat-row ${side} ${isActor ? 'actor' : ''}">
       <div class="pet-chat-speaker">${esc(name)}</div>
       <div class="pet-chat-bubble">${esc(item.content)}</div>
     </div>`;
 }
 
 function renderHistoryMessage(message) {
-  const isUser = message.role === 'user';
-  const name = seekyMessageName(message.role);
-  const actorCls = isUser ? 'user' : `assistant ${message.role === 'aion' || message.role === 'connor' ? 'actor' : ''}`;
+  const role = normalizeSeekyMessageRole(message);
+  const isUser = role === 'user';
+  const name = seekyMessageName(role);
+  const actorCls = isUser ? 'user' : `assistant ${role === 'aion' || role === 'connor' ? 'actor' : ''}`;
   return `
     <div class="history-msg ${actorCls}" data-msg-id="${esc(message.id)}">
       <div class="history-name">${esc(name)}</div>

@@ -12,6 +12,8 @@ router = APIRouter(prefix="/api/idle-autonomy", tags=["idle-autonomy"])
 class IdleConfigUpdate(BaseModel):
     enabled: Optional[bool] = None
     interval_minutes: Optional[int] = None
+    interval_min_minutes: Optional[int] = None
+    interval_max_minutes: Optional[int] = None
     actions: Optional[dict[str, bool]] = None
 
 
@@ -25,6 +27,8 @@ async def update_idle_config(body: IdleConfigUpdate):
     return save_idle_config(
         enabled=body.enabled,
         interval_minutes=body.interval_minutes,
+        interval_min_minutes=body.interval_min_minutes,
+        interval_max_minutes=body.interval_max_minutes,
         actions=body.actions,
     )
 

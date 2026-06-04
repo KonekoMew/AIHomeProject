@@ -3,6 +3,7 @@ import json
 import random
 import re
 import time
+from datetime import datetime, timedelta
 from typing import Any
 
 import aiosqlite
@@ -47,18 +48,50 @@ def get_idle_config() -> dict[str, Any]:
     actions = SETTINGS.get("idle_autonomy_actions")
     if not isinstance(actions, dict):
         actions = {key: True for key in ACTION_DEFS}
+    old_interval = max(5, int(SETTINGS.get("idle_autonomy_interval_minutes", 120) or 120))
+    min_minutes = max(5, int(SETTINGS.get("idle_autonomy_interval_min_minutes", old_interval) or old_interval))
+    max_minutes = max(5, int(SETTINGS.get("idle_autonomy_interval_max_minutes", old_interval) or old_interval))
+    if max_minutes < min_minutes:
+        min_minutes, max_minutes = max_minutes, min_minutes
+    next_delay = int(SETTINGS.get("idle_autonomy_next_delay_minutes", 0) or 0)
+    if next_delay < min_minutes or next_delay > max_minutes:
+        next_delay = 0
     return {
         "enabled": bool(SETTINGS.get("idle_autonomy_enabled", False)),
-        "interval_minutes": max(5, int(SETTINGS.get("idle_autonomy_interval_minutes", 120) or 120)),
+        "interval_minutes": max_minutes,
+        "interval_min_minutes": min_minutes,
+        "interval_max_minutes": max_minutes,
+        "next_delay_minutes": next_delay,
         "actions": {key: bool(actions.get(key, True)) for key in ACTION_DEFS},
     }
 
 
-def save_idle_config(*, enabled: bool | None = None, interval_minutes: int | None = None, actions: dict | None = None) -> dict:
+def save_idle_config(
+    *,
+    enabled: bool | None = None,
+    interval_minutes: int | None = None,
+    interval_min_minutes: int | None = None,
+    interval_max_minutes: int | None = None,
+    actions: dict | None = None,
+) -> dict:
     if enabled is not None:
         SETTINGS["idle_autonomy_enabled"] = bool(enabled)
     if interval_minutes is not None:
-        SETTINGS["idle_autonomy_interval_minutes"] = max(5, int(interval_minutes or 120))
+        minutes = max(5, int(interval_minutes or 120))
+        SETTINGS["idle_autonomy_interval_minutes"] = minutes
+        SETTINGS["idle_autonomy_interval_min_minutes"] = minutes
+        SETTINGS["idle_autonomy_interval_max_minutes"] = minutes
+        SETTINGS.pop("idle_autonomy_next_delay_minutes", None)
+    if interval_min_minutes is not None or interval_max_minutes is not None:
+        current = get_idle_config()
+        min_minutes = current["interval_min_minutes"] if interval_min_minutes is None else max(5, int(interval_min_minutes or 5))
+        max_minutes = current["interval_max_minutes"] if interval_max_minutes is None else max(5, int(interval_max_minutes or min_minutes))
+        if max_minutes < min_minutes:
+            min_minutes, max_minutes = max_minutes, min_minutes
+        SETTINGS["idle_autonomy_interval_minutes"] = max_minutes
+        SETTINGS["idle_autonomy_interval_min_minutes"] = min_minutes
+        SETTINGS["idle_autonomy_interval_max_minutes"] = max_minutes
+        SETTINGS.pop("idle_autonomy_next_delay_minutes", None)
     if actions is not None:
         current = get_idle_config()["actions"]
         for key in ACTION_DEFS:
@@ -67,6 +100,43 @@ def save_idle_config(*, enabled: bool | None = None, interval_minutes: int | Non
         SETTINGS["idle_autonomy_actions"] = current
     save_settings(SETTINGS)
     return get_idle_config()
+
+
+def _schedule_next_idle_delay(cfg: dict[str, Any] | None = None) -> int:
+    cfg = cfg or get_idle_config()
+    min_minutes = int(cfg.get("interval_min_minutes") or cfg.get("interval_minutes") or 120)
+    max_minutes = int(cfg.get("interval_max_minutes") or cfg.get("interval_minutes") or min_minutes)
+    if max_minutes < min_minutes:
+        min_minutes, max_minutes = max_minutes, min_minutes
+    delay = random.randint(max(5, min_minutes), max(5, max_minutes))
+    SETTINGS["idle_autonomy_next_delay_minutes"] = delay
+    save_settings(SETTINGS)
+    return delay
+
+
+def _current_idle_delay_minutes(cfg: dict[str, Any]) -> int:
+    delay = int(cfg.get("next_delay_minutes") or 0)
+    min_minutes = int(cfg.get("interval_min_minutes") or cfg.get("interval_minutes") or 120)
+    max_minutes = int(cfg.get("interval_max_minutes") or cfg.get("interval_minutes") or min_minutes)
+    if min_minutes <= delay <= max_minutes:
+        return delay
+    return _schedule_next_idle_delay(cfg)
+
+
+def _next_idle_actor() -> str:
+    last = str(SETTINGS.get("idle_autonomy_last_actor") or "").strip().lower()
+    if last == "aion":
+        return "connor"
+    if last == "connor":
+        return "aion"
+    return random.choice(["aion", "connor"])
+
+
+def _record_idle_actor(actor: str):
+    if actor not in ("aion", "connor"):
+        return
+    SETTINGS["idle_autonomy_last_actor"] = actor
+    save_settings(SETTINGS)
 
 
 def _json_extract(text: str) -> dict:
@@ -104,9 +174,16 @@ def _idle_event_home_title(row, shown_diary_ids: set[str], shown_moment_ids: set
     action = str(row["action"] or "")
     result_type = str(row["result_type"] or "")
     result_id = str(row["result_id"] or "")
+    try:
+        meta = json.loads(row["metadata"] or "{}")
+    except Exception:
+        meta = {}
 
     if action == "select":
         return None
+    if action == "seeky_interaction":
+        phrase = SEEKY_EVENT_PHRASES.get(str(meta.get("seeky_action") or ""))
+        return f"{_actor_label(row['actor'])}对Seeky{phrase}" if phrase else row["title"]
     if action == "home_dynamics_result":
         return None
     if action.endswith("_result") and result_type == "message":
@@ -118,7 +195,7 @@ def _idle_event_home_title(row, shown_diary_ids: set[str], shown_moment_ids: set
             return None
         if result_type not in ("diary", "moment"):
             return None
-    if action not in ("home_dynamics", "memory_browse", "memory_browse_result"):
+    if action not in ("home_dynamics", "memory_browse", "memory_browse_result", "seeky_interaction"):
         return None
     return row["title"]
 
@@ -418,15 +495,34 @@ async def _run_role_chat(actor: str) -> dict:
     return {"event": event}
 
 
-async def _random_memories(actor: str, limit: int = 5) -> list[dict]:
+def _memory_basis_ts(mem: dict) -> float:
+    return float(mem.get("source_start_ts") or mem.get("created_at") or time.time())
+
+
+def _memory_day_key(ts: float) -> str:
+    return (datetime.fromtimestamp(ts) - timedelta(hours=5)).strftime("%Y-%m-%d")
+
+
+def _memory_day_window(day: str) -> tuple[float, float]:
+    start = datetime.strptime(day, "%Y-%m-%d") + timedelta(hours=5)
+    end = start + timedelta(days=1)
+    return start.timestamp(), end.timestamp()
+
+
+def _memory_day_label(day: str) -> str:
+    start = datetime.strptime(day, "%Y-%m-%d") + timedelta(hours=5)
+    end = start + timedelta(days=1)
+    return f"{start.strftime('%Y-%m-%d %H:%M')} - {end.strftime('%Y-%m-%d %H:%M')}"
+
+
+async def _memory_rows(actor: str) -> list[dict]:
     items: list[dict] = []
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         if actor == "connor":
             cur = await db.execute(
-                "SELECT id, content, scope AS type, created_at FROM chatroom_memories "
-                "WHERE scope IN ('connor','group') ORDER BY RANDOM() LIMIT ?",
-                (limit,),
+                "SELECT id, content, scope AS type, created_at, source_start_ts, source_end_ts FROM chatroom_memories "
+                "WHERE scope IN ('connor','group') ORDER BY COALESCE(source_start_ts, created_at) ASC"
             )
             for row in await cur.fetchall():
                 d = dict(row)
@@ -435,47 +531,80 @@ async def _random_memories(actor: str, limit: int = 5) -> list[dict]:
                 items.append(d)
         else:
             cur = await db.execute(
-                "SELECT id, content, type, created_at FROM memories ORDER BY RANDOM() LIMIT ?",
-                (limit,),
+                "SELECT id, content, type, created_at, source_start_ts, source_end_ts FROM memories "
+                "ORDER BY COALESCE(source_start_ts, created_at) ASC"
             )
             for row in await cur.fetchall():
                 items.append({**dict(row), "source": "main"})
-    random.shuffle(items)
-    return items[:limit]
+    return items
+
+
+async def _random_memory_days(actor: str, limit: int = 6) -> list[dict]:
+    days: dict[str, dict] = {}
+    for mem in await _memory_rows(actor):
+        day = _memory_day_key(_memory_basis_ts(mem))
+        info = days.setdefault(day, {"day": day, "memory_count": 0})
+        info["memory_count"] += 1
+    options = list(days.values())
+    random.shuffle(options)
+    return options[:limit]
+
+
+async def _memories_for_day(actor: str, day: str) -> list[dict]:
+    start_ts, end_ts = _memory_day_window(day)
+    items = []
+    for mem in await _memory_rows(actor):
+        ts = _memory_basis_ts(mem)
+        if start_ts <= ts < end_ts:
+            items.append(mem)
+    items.sort(key=_memory_basis_ts)
+    return items
 
 
 async def _run_memory_browse(actor: str) -> dict:
     actor_name = _actor_label(actor)
-    memories = await _random_memories(actor, 6)
-    if not memories:
+    day_options = await _random_memory_days(actor, 6)
+    if not day_options:
         event = await append_idle_event(actor, "memory_browse", f"{actor_name}想翻看记忆库，但没有找到可读记忆")
         return {"event": event}
-    numbered = "\n".join(
-        f"{idx}. [{m.get('type') or 'memory'}] {_clip(m.get('content') or '', 180)}"
-        for idx, m in enumerate(memories, 1)
+    numbered_days = "\n".join(
+        f"{idx}. {d['day']}（{_memory_day_label(d['day'])}）"
+        for idx, d in enumerate(day_options, 1)
     )
     choice = await _ask_actor_json(actor, (
-        "[随机翻看记忆库 - 选择]\n"
-        "下面是系统随机抽出的记忆摘要。请选择一个编号继续翻看。只返回 JSON。\n\n"
-        f"{numbered}\n\n"
-        '格式：{"selected_number":1,"reason":"一句话理由"}'
+        "[随机翻看记忆库 - 选择日期]\n"
+        "下面是系统随机抽出的、确认存在摘要记忆的日期。一天按凌晨5点到次日凌晨5点计算。"
+        "请选择一个日期继续翻看。这里不会展示具体记忆内容，只需要按你的直觉选择。只返回 JSON。\n\n"
+        f"{numbered_days}\n\n"
+        '格式：{"selected_day":"2026-05-30","reason":"一句话理由"}'
     ))
-    try:
-        selected_number = int(choice.get("selected_number") or 1)
-    except Exception:
-        selected_number = 1
-    selected_number = max(1, min(len(memories), selected_number))
-    selected = memories[selected_number - 1]
+    valid_days = {d["day"]: d for d in day_options}
+    selected_day = str(choice.get("selected_day") or "").strip()
+    if selected_day not in valid_days:
+        selected_day = random.choice(day_options)["day"]
+    day_memories = await _memories_for_day(actor, selected_day)
+    if not day_memories:
+        event = await append_idle_event(actor, "memory_browse", f"{actor_name}想翻看记忆库，但这一天的记忆已经不可读")
+        return {"event": event}
+    day_label = _memory_day_label(selected_day)
     await append_idle_event(
         actor, "memory_browse", f"{actor_name}翻看了记忆库",
-        _clip(selected.get("content") or "", 260),
-        target_type="memory", target_id=selected["id"], metadata={"reason": choice.get("reason", "")},
+        f"{day_label}（{len(day_memories)}条摘要记忆）",
+        target_type="memory_day", target_id=selected_day,
+        metadata={"reason": choice.get("reason", ""), "selected_day": selected_day, "memory_count": len(day_memories)},
+    )
+    day_summary = "\n".join(
+        f"{idx}. [{m.get('type') or 'memory'}] {m.get('content') or ''}"
+        for idx, m in enumerate(day_memories, 1)
     )
     result = await _ask_actor_json(actor, (
-        "[随机翻看记忆库 - 读完]\n"
-        "你刚才翻看了下面这条记忆。读完后请选择一件事：发一条朋友圈、写一篇日记随笔、"
+        "[随机翻看记忆库 - 读完某一天]\n"
+        "你刚才翻看了下面这一天的所有摘要记忆。这里只包含摘要记忆，不包含挂载的聊天原文。"
+        "读完后请选择一件事：发一条朋友圈、写一篇日记随笔、"
         "私聊给用户发一条消息，或者什么都不发。只返回 JSON。\n\n"
-        f"记忆内容：\n{selected.get('content') or ''}\n\n"
+        f"记忆日期：{selected_day}\n"
+        f"时间范围：{day_label}\n"
+        f"摘要记忆：\n{day_summary}\n\n"
         "格式：\n"
         '{"after_read_action":"post_moment/write_diary/private_message/none",'
         '"moment_content":"","diary_title":"","diary_content":"","diary_mood":"","private_message":""}'
@@ -488,7 +617,7 @@ async def _run_memory_browse(actor: str) -> dict:
             content=str(result.get("moment_content") or "").strip(),
             expect_reply=False,
             source_conv="idle_memory",
-            source_msg_id=selected["id"],
+            source_msg_id=selected_day,
         )
         if moment:
             event = await append_idle_event(
@@ -504,7 +633,7 @@ async def _run_memory_browse(actor: str) -> dict:
             content=str(result.get("diary_content") or "").strip(),
             mood=str(result.get("diary_mood") or "").strip(),
             source_type="idle_memory",
-            source_ref=selected["id"],
+            source_ref=selected_day,
         )
         if diary:
             event = await append_idle_event(
@@ -565,28 +694,215 @@ async def _home_dynamics_text(hours: int = 6, limit: int = 80) -> str:
     return "\n".join(f"[{time.strftime('%H:%M', time.localtime(ts))}] {text}" for ts, text in items[-limit:])
 
 
+async def _home_dynamics_snapshot(hours: int = 6, limit: int = 80) -> tuple[str, list[dict]]:
+    cutoff = time.time() - hours * 3600
+    items: list[dict] = []
+    shown_moment_ids: set[str] = set()
+    shown_diary_ids: set[str] = set()
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id, author, content, created_at FROM moments "
+            "WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            (cutoff, limit),
+        )
+        for r in await cur.fetchall():
+            actor_name = _actor_label(r["author"])
+            shown_moment_ids.add(str(r["id"]))
+            items.append({
+                "kind": "moment",
+                "id": r["id"],
+                "author": r["author"],
+                "created_at": r["created_at"],
+                "title": f"{actor_name}发布了朋友圈：{_clip(r['content'], 120)}",
+            })
+
+        cur = await db.execute(
+            "SELECT id, author, title, content, created_at FROM diary_entries "
+            "WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            (cutoff, limit),
+        )
+        for r in await cur.fetchall():
+            actor_name = _actor_label(r["author"])
+            shown_diary_ids.add(str(r["id"]))
+            items.append({
+                "kind": "diary",
+                "id": r["id"],
+                "author": r["author"],
+                "created_at": r["created_at"],
+                "title": f"{actor_name}发布了日记：{_clip(r['title'] or r['content'], 120)}",
+            })
+
+        cur = await db.execute(
+            "SELECT id, image_path, message, created_at, sender FROM gifts "
+            "WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            (cutoff, limit),
+        )
+        for r in await cur.fetchall():
+            actor = r["sender"] or "aion"
+            items.append({
+                "kind": "gift",
+                "id": r["id"],
+                "author": actor,
+                "created_at": r["created_at"],
+                "title": f"{_actor_label(actor)}送出了礼物：{_clip(r['message'], 120)}",
+            })
+
+        cur = await db.execute(
+            "SELECT id, actor, action, title, result_type, result_id, metadata, created_at FROM idle_events "
+            "WHERE created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            (cutoff, limit),
+        )
+        for r in await cur.fetchall():
+            title = _idle_event_home_title(r, shown_diary_ids, shown_moment_ids)
+            if title:
+                items.append({
+                    "kind": "idle_event",
+                    "id": r["id"],
+                    "author": r["actor"],
+                    "created_at": r["created_at"],
+                    "title": title,
+                })
+
+    items.sort(key=lambda x: x["created_at"])
+    items = items[-limit:]
+    for idx, item in enumerate(items, 1):
+        item["index"] = idx
+    if not items:
+        return "（近6小时暂无家庭动态）", []
+    text = "\n".join(
+        f"{item['index']}. [{time.strftime('%H:%M', time.localtime(item['created_at']))}] {item['title']}"
+        for item in items
+    )
+    return text, items
+
+
+def _home_item_by_index(items: list[dict], index: Any, *, kind: str | None = None, exclude_author: str | None = None) -> dict | None:
+    try:
+        idx = int(index)
+    except Exception:
+        idx = 0
+    candidates = [item for item in items if (not kind or item.get("kind") == kind)]
+    if exclude_author:
+        candidates = [item for item in candidates if item.get("author") != exclude_author]
+    for item in candidates:
+        if item.get("index") == idx:
+            return item
+    return candidates[-1] if candidates else None
+
+
+async def _write_home_dynamics_diary(actor: str, result: dict, text: str) -> dict | None:
+    from diary import save_diary_entry
+    title = str(result.get("diary_title") or "").strip() or "看了看家里的近况"
+    content = str(result.get("diary_content") or "").strip()
+    if not content:
+        content = f"刚刚翻看了近6小时的家庭动态，心里留下了一点想法。\n\n{text}"
+    diary = await save_diary_entry(
+        author=actor,
+        title=title,
+        content=content,
+        mood=str(result.get("diary_mood") or "").strip(),
+        source_type="idle_home_dynamics",
+        source_ref="home_dynamics",
+    )
+    if diary:
+        await append_idle_event(
+            actor, "home_dynamics_result", f"{_actor_label(actor)}根据家庭动态写了日记",
+            _clip(diary.get("title") or diary.get("content") or ""), result_type="diary", result_id=diary["id"],
+        )
+    return diary
+
+
+async def _run_home_group_tease(actor: str, result: dict, items: list[dict], text: str) -> dict | None:
+    from routes.chatroom import _load_room_and_messages, _reply_aion, _reply_connor, _save_msg
+
+    room_id = await _latest_group_room_id()
+    if not room_id:
+        return None
+    target = "connor" if actor == "aion" else "aion"
+    target_name = _actor_label(target)
+    item = _home_item_by_index(items, result.get("target_index"), exclude_author=actor)
+    context = item["title"] if item else text
+    message = _clip(str(result.get("group_message") or "").strip(), 500)
+    if not message:
+        message = f"{target_name}，我刚看到家庭动态里那条：{_clip(context, 120)}"
+    await _save_msg(room_id, actor, message)
+    room, msgs = await _load_room_and_messages(room_id, 50)
+    queue: asyncio.Queue = asyncio.Queue()
+    context_limit = room.get("context_minutes", 30) if room else 30
+    if target == "aion":
+        await _reply_aion(room_id, msgs, context_limit, message, await _aion_model(), queue)
+    else:
+        await _reply_connor(room_id, msgs, context_limit, message, queue, connor_model_key=_connor_model())
+    await append_idle_event(
+        actor, "home_dynamics_result", f"{_actor_label(actor)}根据家庭动态在群聊里调侃了{target_name}",
+        message, target_type="chatroom", target_id=room_id, result_type="chatroom_message",
+    )
+    return {"room_id": room_id, "message": message}
+
+
 async def _run_home_dynamics(actor: str) -> dict:
     actor_name = _actor_label(actor)
-    text = await _home_dynamics_text(6)
+    text, items = await _home_dynamics_snapshot(6)
     result = await _ask_actor_json(actor, (
         "[查看近期家庭动态]\n"
         "下面是近6小时的家庭时间轴，包括朋友圈、日记、礼物和空闲行为。"
-        "看完后你可以选择给用户私聊一句，也可以只留下一个话题种子不打扰。只返回 JSON。\n\n"
+        "看完后你必须选择并执行一个行动，不能静默。"
+        "可选行动：reply_moment（回复某条朋友圈）、group_tease（在群聊里调侃另一个角色）、"
+        "private_message（私聊用户一条消息）、write_diary（写一篇短日记）。只返回 JSON。\n\n"
         f"{text}\n\n"
-        '格式：{"after_read_action":"private_message/none","private_message":"","topic_seed":"下次可以自然说起的话题"}'
+        "如果选择 reply_moment，target_index 必须指向一条朋友圈，且不要回复你自己的朋友圈。\n"
+        "如果选择 group_tease，target_index 可以指向触发你吐槽的动态，并填写 group_message。\n"
+        "如果选择 private_message，填写 private_message。\n"
+        "如果选择 write_diary，填写 diary_title、diary_content 和 diary_mood。\n\n"
+        '格式：{"after_read_action":"reply_moment/group_tease/private_message/write_diary",'
+        '"target_index":1,"group_message":"","private_message":"","diary_title":"","diary_content":"","diary_mood":"",'
+        '"reason":"一句话理由"}'
     ))
+    action = str(result.get("after_read_action") or "").strip()
+    if action not in {"reply_moment", "group_tease", "private_message", "write_diary"}:
+        action = "write_diary"
     event = await append_idle_event(
         actor, "home_dynamics", f"{actor_name}查看了近期家庭动态",
-        _clip(str(result.get("topic_seed") or text), 300),
+        _clip(str(result.get("reason") or text), 300),
+        metadata={"selected_action": action, "target_index": result.get("target_index")},
     )
-    if str(result.get("after_read_action") or "").strip() == "private_message":
+
+    if action == "reply_moment":
+        item = _home_item_by_index(items, result.get("target_index"), kind="moment", exclude_author=actor)
+        if item:
+            from routes.moments import _ai_reply_to_moment
+            comment = await _ai_reply_to_moment(actor, item["id"])
+            if comment:
+                await append_idle_event(
+                    actor, "home_dynamics_result", f"{actor_name}根据家庭动态回复了朋友圈",
+                    _clip(comment.get("content") or ""), target_type="moment", target_id=item["id"],
+                    result_type="moment_comment", result_id=comment["id"],
+                )
+                return {"event": event, "comment": comment}
+        diary = await _write_home_dynamics_diary(actor, result, text)
+        return {"event": event, "diary": diary}
+
+    if action == "group_tease":
+        teased = await _run_home_group_tease(actor, result, items, text)
+        if teased:
+            return {"event": event, "group_tease": teased}
+        diary = await _write_home_dynamics_diary(actor, result, text)
+        return {"event": event, "diary": diary}
+
+    if action == "private_message":
         msg = await _save_private_message(actor, str(result.get("private_message") or "").strip())
         if msg:
             await append_idle_event(
                 actor, "home_dynamics_result", f"{actor_name}根据家庭动态私聊了用户",
                 _clip(msg.get("content") or ""), result_type="message", result_id=msg["id"],
             )
-    return {"event": event}
+            return {"event": event, "message": msg}
+        diary = await _write_home_dynamics_diary(actor, result, text)
+        return {"event": event, "diary": diary}
+
+    diary = await _write_home_dynamics_diary(actor, result, text)
+    return {"event": event, "diary": diary}
 
 
 async def _run_cam_check(actor: str) -> dict:
@@ -690,8 +1006,8 @@ class IdleAutonomyManager:
             if not manual and not cfg["enabled"]:
                 return {"ok": False, "skipped": "disabled"}
             now = time.time()
-            interval = cfg["interval_minutes"] * 60
             if not manual:
+                interval = _current_idle_delay_minutes(cfg) * 60
                 latest_user = await _latest_user_message_ts()
                 latest_idle = await _latest_idle_event_ts()
                 if latest_user and now - latest_user < interval:
@@ -699,39 +1015,22 @@ class IdleAutonomyManager:
                 if latest_idle and now - latest_idle < interval:
                     return {"ok": False, "skipped": "idle action cooldown"}
 
-            results = []
-            for actor in ("aion", "connor"):
-                try:
-                    results.append(await _run_actor_once(actor, manual=manual))
-                except Exception as exc:
-                    results.append({"ok": False, "actor": actor, "error": str(exc)})
-                    await append_idle_event(
-                        actor, "error", f"{_actor_label(actor)}的空闲行动失败",
-                        str(exc), metadata={"manual": manual},
-                    )
-            return {"ok": True, "results": results}
-
-            actor = random.choice(["aion", "connor"])
-            selected = await _select_action(actor)
-            action = selected["action"]
-            actor_name = _actor_label(actor)
-            await append_idle_event(
-                actor, "select", f"{actor_name}选择了{ACTION_DEFS.get(action, action)}",
-                selected.get("reason", ""), metadata={"selected_action": action, "manual": manual},
-            )
-            if action == "seeky_interaction":
-                result = await _run_seeky_interaction(actor)
-            elif action == "role_chat":
-                result = await _run_role_chat(actor)
-            elif action == "memory_browse":
-                result = await _run_memory_browse(actor)
-            elif action == "home_dynamics":
-                result = await _run_home_dynamics(actor)
-            elif action == "cam_check":
-                result = await _run_cam_check(actor)
-            else:
-                result = {}
-            return {"ok": True, "actor": actor, "action": action, "result": result}
+            actor = _next_idle_actor()
+            try:
+                result = await _run_actor_once(actor, manual=manual)
+                _record_idle_actor(actor)
+                if not manual:
+                    _schedule_next_idle_delay(get_idle_config())
+                return result
+            except Exception as exc:
+                _record_idle_actor(actor)
+                await append_idle_event(
+                    actor, "error", f"{_actor_label(actor)}的空闲行动失败",
+                    str(exc), metadata={"manual": manual},
+                )
+                if not manual:
+                    _schedule_next_idle_delay(get_idle_config())
+                return {"ok": False, "actor": actor, "error": str(exc)}
 
 
 idle_autonomy_mgr = IdleAutonomyManager()
