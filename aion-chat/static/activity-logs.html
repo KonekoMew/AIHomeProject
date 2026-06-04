@@ -123,11 +123,18 @@
 .timeline-toolbar {
   display:flex; gap:8px; align-items:center; margin-bottom:10px;
 }
-.timeline-toolbar select, .timeline-toolbar button {
+.timeline-toolbar select, .timeline-toolbar button, .timeline-toolbar input {
   border:1px solid var(--border); background:var(--surface2); color:var(--text);
   border-radius:7px; padding:7px 10px; font-size:13px; outline:none;
 }
 .timeline-toolbar select { flex:1; min-width:0; }
+.timeline-toolbar input { width:72px; }
+.idle-toolbar-label {
+  font-size:12px; color:var(--text2); white-space:nowrap;
+}
+.idle-test-btn.running {
+  opacity:.7; pointer-events:none;
+}
 .timeline-list {
   flex:1; overflow-y:auto; max-height:calc(100dvh - 190px);
   background:transparent; padding:4px 0 8px;
@@ -239,6 +246,15 @@
         </select>
         <button onclick="loadTimeline()">刷新</button>
       </div>
+      <div class="timeline-toolbar">
+        <span class="idle-toolbar-label">AI空闲</span>
+        <input id="idleIntervalMinutes" type="number" min="5" step="5" value="120" title="自动触发间隔（分钟）">
+        <button onclick="saveIdleConfig()">保存</button>
+        <button id="idleTestBtn" class="idle-test-btn" onclick="runIdleTest()">测试触发</button>
+      </div>
+      <div class="timeline-toolbar">
+        <label class="idle-toolbar-label"><input id="idleEnabledToggle" type="checkbox"> 启用自动空闲</label>
+      </div>
       <div class="timeline-list" id="timelineList">
         <div class="timeline-empty">加载中...</div>
       </div>
@@ -270,6 +286,7 @@ let currentActivityTab = 'logs';
 let timelineLoaded = false;
 let timelineItems = [];
 let timelinePressTimer = null;
+let idleConfig = null;
 
 function switchActivityTab(tab) {
   hideTimelinePopover();
@@ -403,6 +420,9 @@ connectCommonWS(msg => {
       const el = $('logList');
       el.scrollTop = el.scrollHeight;
     }
+  }
+  if (msg.type === 'idle_event' && currentActivityTab === 'timeline') {
+    loadTimeline();
   }
 });
 
@@ -580,6 +600,52 @@ async function loadActivityConfig() {
     $('activityTrackingToggle').checked = data.activity_tracking_enabled;
   } catch(e) {}
 }
+async function loadIdleConfig() {
+  try {
+    idleConfig = await api('GET', '/api/idle-autonomy/config');
+    const input = $('idleIntervalMinutes');
+    if (input && idleConfig) input.value = idleConfig.interval_minutes || 120;
+    const enabled = $('idleEnabledToggle');
+    if (enabled && idleConfig) enabled.checked = !!idleConfig.enabled;
+  } catch(e) {}
+}
+async function saveIdleConfig() {
+  const minutes = Math.max(5, parseInt($('idleIntervalMinutes')?.value || '120', 10) || 120);
+  try {
+    idleConfig = await api('PUT', '/api/idle-autonomy/config', {
+      enabled: !!$('idleEnabledToggle')?.checked,
+      interval_minutes: minutes
+    });
+    $('idleIntervalMinutes').value = idleConfig.interval_minutes || minutes;
+    showToast('AI空闲间隔已保存');
+  } catch(e) {
+    showToast('保存失败');
+  }
+}
+async function runIdleTest() {
+  const btn = $('idleTestBtn');
+  if (btn) {
+    btn.classList.add('running');
+    btn.textContent = '触发中...';
+  }
+  try {
+    const res = await api('POST', '/api/idle-autonomy/run-once');
+    if (res.ok) {
+      showToast('AI空闲互动已触发');
+      timelineLoaded = false;
+      if (currentActivityTab === 'timeline') loadTimeline();
+    } else {
+      showToast(res.error || res.skipped || '触发失败');
+    }
+  } catch(e) {
+    showToast('触发失败');
+  } finally {
+    if (btn) {
+      btn.classList.remove('running');
+      btn.textContent = '测试触发';
+    }
+  }
+}
 async function toggleActivityTracking(enabled) {
   try {
     await api('PUT', '/api/activity/config', { activity_tracking_enabled: enabled });
@@ -593,6 +659,7 @@ async function toggleActivityTracking(enabled) {
 /* ── 初始化 ── */
 loadRecent();
 loadActivityConfig();
+loadIdleConfig();
 </script>
 </body>
 </html>
