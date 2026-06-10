@@ -13,7 +13,12 @@ from pydantic import BaseModel
 
 from config import load_digest_anchor, load_worldbook, save_digest_anchor
 from database import get_db
-from memory import _pack_embedding, get_embedding, manual_digest, rebuild_embeddings
+from memory import (
+    _pack_embedding, get_embedding, manual_digest, rebuild_embeddings,
+    memory_kind_for_type, memory_kind_label, generate_daily_compression_draft,
+    get_latest_daily_compression_review, apply_daily_compression_review,
+    discard_daily_compression_review,
+)
 from ws import manager
 
 router = APIRouter()
@@ -38,6 +43,11 @@ class AnchorReset(BaseModel):
 
 class MemorySourceSelection(BaseModel):
     source_message_ids: list[str] = []
+
+
+class DailyCompressionRequest(BaseModel):
+    target: str = "main"
+    days: int = 14
 
 
 def _json_list(value):
@@ -115,6 +125,15 @@ def _source_score(mem, row, keywords: list[str], needles: list[str]) -> float:
     return score
 
 
+def _chatroom_sender_name(sender: str, user_name: str, ai_name: str) -> str:
+    try:
+        from chatroom import get_chatroom_names
+        _, _, companion_name = get_chatroom_names()
+    except Exception:
+        companion_name = "第二AI"
+    return {"user": user_name, "aion": ai_name, "connor": companion_name}.get(sender, sender)
+
+
 async def _fetch_source_rows_by_ids(source_ids: list[str], user_name: str, ai_name: str) -> list[dict]:
     rows = []
     async with get_db() as db:
@@ -145,11 +164,10 @@ async def _fetch_source_rows_by_ids(source_ids: list[str], user_name: str, ai_na
                 )
                 row = await cur.fetchone()
                 if row:
-                    name = {"user": user_name, "aion": ai_name, "connor": "Connor"}.get(row["sender"], row["sender"])
                     rows.append({
                         "id": f"chatroom:{raw_id}",
                         "role": "assistant" if row["sender"] == "aion" else "user",
-                        "name": name,
+                        "name": _chatroom_sender_name(row["sender"], user_name, ai_name),
                         "content": row["content"],
                         "created_at": row["created_at"],
                         "source": "chatroom",
@@ -170,6 +188,8 @@ async def list_memories():
         result = []
         for row in rows:
             item = dict(row)
+            item["memory_kind"] = memory_kind_for_type(item.get("type"))
+            item["memory_kind_label"] = memory_kind_label(item.get("type"))
             explicit_source = bool(str(item.get("source_msg_id") or "").strip())
             source_ids = _source_ids_for_memory(row)
             if explicit_source:
@@ -216,6 +236,8 @@ async def create_memory(body: MemoryCreate):
         "source_start_ts": None,
         "source_end_ts": None,
         "source_msg_id": None,
+        "memory_kind": memory_kind_for_type(body.type),
+        "memory_kind_label": memory_kind_label(body.type),
     }
     await manager.broadcast({"type": "memory_added", "data": mem})
     return mem
@@ -282,6 +304,28 @@ async def get_memories_by_conv(conv_id: str):
 @router.post("/api/memories/digest")
 async def trigger_digest():
     return await manual_digest()
+
+
+@router.post("/api/memories/compress-daily")
+async def trigger_daily_compression(body: Optional[DailyCompressionRequest] = None):
+    payload = body or DailyCompressionRequest()
+    return await generate_daily_compression_draft(days=payload.days, target=payload.target)
+
+
+@router.get("/api/memories/compress-daily/latest")
+async def latest_daily_compression_review(target: str = "main"):
+    review = await get_latest_daily_compression_review(target=target)
+    return {"ok": True, "review": review}
+
+
+@router.post("/api/memories/compress-daily/{review_id}/apply")
+async def apply_daily_compression(review_id: str):
+    return await apply_daily_compression_review(review_id)
+
+
+@router.post("/api/memories/compress-daily/{review_id}/discard")
+async def discard_daily_compression(review_id: str):
+    return await discard_daily_compression_review(review_id)
 
 
 @router.post("/api/memories/rebuild-embeddings")
@@ -362,7 +406,7 @@ async def get_memory_source(mem_id: str):
                 all_msgs.append({
                     "id": f"chatroom:{row['id']}",
                     "role": "assistant" if row["sender"] == "aion" else "user",
-                    "name": {"user": user_name, "aion": ai_name, "connor": "Connor"}.get(row["sender"], row["sender"]),
+                    "name": _chatroom_sender_name(row["sender"], user_name, ai_name),
                     "content": row["content"],
                     "created_at": row["created_at"],
                     "source": "chatroom",

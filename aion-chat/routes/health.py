@@ -13,11 +13,18 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from database import get_db
+from health_context import (
+    analyze_heart_rate_entry,
+    get_heart_config,
+    get_heart_events,
+    update_heart_config,
+)
 from ws import manager
 
 router = APIRouter(prefix="/api/health", tags=["health"])
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ring_diag_info = {"info": "", "status": "", "ts": 0}
 
 
 def _valid_date(value: str) -> bool:
@@ -57,6 +64,33 @@ class RingSnapshot(BaseModel):
     raw: Optional[dict] = None
 
 
+class RingHeartRate(BaseModel):
+    device_name: str = ""
+    heart_rate: int
+    measured_at: Optional[float] = None
+    source: str = ""
+    raw: Optional[dict] = None
+
+
+class HeartConfigUpdate(BaseModel):
+    sleep_low_max: Optional[int] = None
+    normal_min: Optional[int] = None
+    normal_max: Optional[int] = None
+    elevated_min: Optional[int] = None
+    exercise_min: Optional[int] = None
+    attention_low: Optional[int] = None
+    attention_high: Optional[int] = None
+    large_delta: Optional[int] = None
+    night_start_hour: Optional[int] = None
+    night_end_hour: Optional[int] = None
+    stale_minutes: Optional[int] = None
+
+
+class RingDiagReport(BaseModel):
+    status: str = ""
+    info: str = ""
+
+
 class WeightEntry(BaseModel):
     date: str
     weight_kg: float
@@ -72,12 +106,87 @@ class PeriodEntry(BaseModel):
     note: str = ""
 
 
+def _valid_heart_rate(value: Optional[int]) -> bool:
+    return isinstance(value, int) and 20 <= value <= 240
+
+
+async def _insert_heart_rate(
+    db,
+    *,
+    device_name: str,
+    heart_rate: Optional[int],
+    measured_at: Optional[float],
+    source: str,
+    raw: Optional[dict] = None,
+):
+    if not _valid_heart_rate(heart_rate):
+        return None
+    now = time.time()
+    measured = measured_at or now
+    entry_id = f"hr_{int(measured * 1000)}_{int(heart_rate)}"
+    raw_json = json.dumps(raw or {}, ensure_ascii=False)
+    db.row_factory = aiosqlite.Row
+    cur = await db.execute(
+        "SELECT id, created_at FROM health_ring_heart_rates WHERE id=?",
+        (entry_id,),
+    )
+    existing = await cur.fetchone()
+    is_new = existing is None
+    await db.execute(
+        """
+        INSERT INTO health_ring_heart_rates
+            (id, device_name, heart_rate, measured_at, source, raw_json, created_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            device_name=excluded.device_name,
+            source=excluded.source,
+            raw_json=excluded.raw_json
+        """,
+        (
+            entry_id,
+            (device_name or "").strip(),
+            int(heart_rate),
+            measured,
+            (source or "").strip()[:40],
+            raw_json,
+            now,
+        ),
+    )
+    await db.execute(
+        "DELETE FROM health_ring_heart_rates "
+        "WHERE id NOT IN (SELECT id FROM health_ring_heart_rates ORDER BY measured_at DESC LIMIT 20)"
+    )
+    return {
+        "id": entry_id,
+        "device_name": (device_name or "").strip(),
+        "heart_rate": int(heart_rate),
+        "measured_at": measured,
+        "source": (source or "").strip()[:40],
+        "raw_json": raw_json,
+        "created_at": now if is_new else float(existing["created_at"] or now),
+        "is_new": is_new,
+    }
+
+
+async def _recent_heart_rates(db, limit: int = 20):
+    db.row_factory = aiosqlite.Row
+    cur = await db.execute(
+        "SELECT id, device_name, heart_rate, measured_at, source, raw_json, created_at "
+        "FROM health_ring_heart_rates ORDER BY measured_at DESC LIMIT ?",
+        (limit,),
+    )
+    return [dict(r) for r in await cur.fetchall()]
+
+
 @router.get("/summary")
 async def get_health_summary():
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM health_ring_latest WHERE id=1")
         ring = _row_dict(await cur.fetchone())
+        heart_rates = await _recent_heart_rates(db, 20)
+        heart_config = await get_heart_config(db)
+        heart_events = await get_heart_events(db, 20)
         cur = await db.execute(
             "SELECT date, weight_kg, note, created_at, updated_at "
             "FROM health_weight_entries ORDER BY date DESC LIMIT 90"
@@ -88,7 +197,14 @@ async def get_health_summary():
             "FROM health_period_entries ORDER BY start_date DESC LIMIT 24"
         )
         periods = [dict(r) for r in await cur.fetchall()]
-    return {"ring": ring, "weights": weights, "periods": periods}
+    return {
+        "ring": ring,
+        "heartRates": heart_rates,
+        "heartConfig": heart_config,
+        "heartEvents": heart_events,
+        "weights": weights,
+        "periods": periods,
+    }
 
 
 @router.post("/ring/latest")
@@ -145,12 +261,130 @@ async def save_ring_latest(body: RingSnapshot):
                 now,
             ),
         )
+        heart_entry = await _insert_heart_rate(
+            db,
+            device_name=body.device_name,
+            heart_rate=body.heart_rate,
+            measured_at=measured_at,
+            source="snapshot",
+            raw=body.raw,
+        )
+        heart_events_created = await analyze_heart_rate_entry(db, heart_entry)
         await db.commit()
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT * FROM health_ring_latest WHERE id=1")
         row = dict(await cur.fetchone())
+        heart_rates = await _recent_heart_rates(db, 20)
+        heart_events = await get_heart_events(db, 20)
     await manager.broadcast({"type": "health_ring_updated", "data": row})
+    if heart_entry:
+        await manager.broadcast({"type": "health_ring_heart_rates_updated", "items": heart_rates})
+    if heart_events_created:
+        await manager.broadcast({"type": "health_heart_events_updated", "items": heart_events})
+        for event in heart_events_created:
+            await manager.broadcast({"type": "health_heart_event_created", "data": event})
     return row
+
+
+@router.get("/ring/heart-rates")
+async def list_ring_heart_rates(limit: int = Query(20, ge=1, le=20)):
+    async with get_db() as db:
+        rows = await _recent_heart_rates(db, limit)
+    return {"items": rows}
+
+
+@router.post("/ring/request-diag")
+async def request_ring_diag():
+    await manager.broadcast({"type": "request_ring_diag"})
+    return {"ok": True}
+
+
+@router.post("/ring/diag-report")
+async def ring_diag_report(body: RingDiagReport):
+    _ring_diag_info["info"] = body.info
+    _ring_diag_info["status"] = body.status
+    _ring_diag_info["ts"] = time.time()
+    print(f"[RingDiag] {body.status} {body.info}")
+    await manager.broadcast({"type": "health_ring_diag", "data": _ring_diag_info})
+    return {"ok": True}
+
+
+@router.get("/ring/diag")
+async def get_ring_diag():
+    return _ring_diag_info
+
+
+@router.get("/heart/config")
+async def get_heart_config_route():
+    return await get_heart_config()
+
+
+@router.put("/heart/config")
+async def update_heart_config_route(body: HeartConfigUpdate):
+    result = await update_heart_config(body.dict(exclude_none=True))
+    if "error" not in result:
+        await manager.broadcast({"type": "health_heart_config_updated", "data": result})
+    return result
+
+
+@router.get("/heart/events")
+async def list_heart_events(limit: int = Query(20, ge=1, le=100)):
+    return {"items": await get_heart_events(limit=limit)}
+
+
+@router.post("/ring/heart-rate")
+async def save_ring_heart_rate(body: RingHeartRate):
+    if not _valid_heart_rate(body.heart_rate):
+        return {"error": "心率数值不正确"}
+    now = time.time()
+    measured_at = body.measured_at or now
+    raw_json = json.dumps(body.raw or {}, ensure_ascii=False)
+    async with get_db() as db:
+        entry = await _insert_heart_rate(
+            db,
+            device_name=body.device_name,
+            heart_rate=body.heart_rate,
+            measured_at=measured_at,
+            source=body.source or "realtime",
+            raw=body.raw,
+        )
+        heart_events_created = await analyze_heart_rate_entry(db, entry)
+        await db.execute(
+            """
+            INSERT INTO health_ring_latest (
+                id, device_name, heart_rate, measured_at, raw_json, synced_at
+            ) VALUES (1,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+                device_name=CASE
+                    WHEN excluded.device_name != '' THEN excluded.device_name
+                    ELSE health_ring_latest.device_name
+                END,
+                heart_rate=excluded.heart_rate,
+                measured_at=excluded.measured_at,
+                raw_json=excluded.raw_json,
+                synced_at=excluded.synced_at
+            """,
+            (
+                (body.device_name or "").strip(),
+                int(body.heart_rate),
+                measured_at,
+                raw_json,
+                now,
+            ),
+        )
+        await db.commit()
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM health_ring_latest WHERE id=1")
+        ring = dict(await cur.fetchone())
+        heart_rates = await _recent_heart_rates(db, 20)
+        heart_events = await get_heart_events(db, 20)
+    await manager.broadcast({"type": "health_ring_updated", "data": ring})
+    await manager.broadcast({"type": "health_ring_heart_rates_updated", "items": heart_rates})
+    if heart_events_created:
+        await manager.broadcast({"type": "health_heart_events_updated", "items": heart_events})
+        for event in heart_events_created:
+            await manager.broadcast({"type": "health_heart_event_created", "data": event})
+    return {"ring": ring, "entry": entry, "items": heart_rates, "events": heart_events_created, "heartEvents": heart_events}
 
 
 @router.get("/weights")

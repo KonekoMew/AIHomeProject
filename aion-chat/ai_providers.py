@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import tempfile
 
-from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, load_worldbook, SETTINGS, get_sentinel_config
+from config import get_key, MODELS, UPLOADS_DIR, CODEX_UPLOADS_DIR, SETTINGS, get_sentinel_config
 
 # CLI 状态前缀：yield 此前缀的 chunk 会被 _bg_generate 拦截为状态事件，不送入 TTS 和正文
 CLI_STATUS_PREFIX = "\x00CLI_STATUS:"
@@ -934,6 +934,8 @@ async def call_antigravity_cli(messages: list, model: str, meta: dict | None = N
         if SETTINGS.get("gemini_cli_tools_enabled", False):
             agy_args.append("--dangerously-skip-permissions")
         agy_args.extend(["--log-file", log_file])
+        if model:
+            agy_args.extend(["--model", model])
         agy_args.append("--print")
         # prompt 通过 base64 解码注入，避免 PS 转义问题
         print_timeout = _antigravity_print_timeout(meta)
@@ -957,8 +959,7 @@ async def call_antigravity_cli(messages: list, model: str, meta: dict | None = N
         )
         Path(script_file).write_text(script_text, encoding="utf-8")
 
-        _ai_name = load_worldbook().get("ai_name") or "AI"
-        yield f"{CLI_STATUS_PREFIX}🚀 {_ai_name}正在思考…"
+        yield f"{CLI_STATUS_PREFIX}🚀 正在思考…"
 
         env = {**os.environ, "NO_COLOR": "1"}
 
@@ -1065,10 +1066,10 @@ async def call_codex_cli(messages: list, model: str, meta: dict | None = None,
            "--color", "never",
            "-C", _CODEX_WORKSPACE,
            "-"]
+    if model:
+        cmd[4:4] = ["-m", model]
 
     try:
-        # Do not pass -m here: Codex should inherit model and reasoning effort
-        # from the user's Codex CLI config.
         env = {**os.environ, "NO_COLOR": "1"}
         env.setdefault("CODEX_HOME", _CODEX_HOME)
         proc = await _spawn_cli_process(cmd, prompt, env)

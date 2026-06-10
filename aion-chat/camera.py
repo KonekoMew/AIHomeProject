@@ -151,7 +151,7 @@ async def async_get_recent_aion_timeline_text(
     *,
     user_name: str = "用户",
     ai_name: str = "AI",
-    connor_name: str = "Connor",
+    connor_name: str = "AI",
 ) -> str:
     """给哨兵看的最近聊天记录，口径与 Aion 私聊上下文一致。"""
     rows = []
@@ -945,6 +945,12 @@ class CameraMonitor:
         wb = load_worldbook()
         user_name = wb.get("user_name", "你")
         ai_name = wb.get("ai_name", "AI")
+        connor_name = "AI"
+        try:
+            from chatroom import load_chatroom_config
+            connor_name = load_chatroom_config().get("connor_name") or "AI"
+        except Exception:
+            pass
         now_str = time.strftime("%Y年%m月%d日  %H时:%M分:%S秒")
 
         conv_id = None
@@ -987,7 +993,7 @@ class CameraMonitor:
                 10,
                 user_name=user_name,
                 ai_name=ai_name,
-                connor_name=wb.get("connor_name", "Connor"),
+                connor_name=connor_name,
             )
         except Exception:
             recent_chat_text = ""
@@ -1005,6 +1011,17 @@ class CameraMonitor:
             f"\n{user_name}近一小时的用户关键动态：\n{user_dynamics_text}\n"
             if user_dynamics_text else ""
         )
+        heart_rate_summary_text = ""
+        try:
+            from health_context import build_heart_rate_summary_for_prompt
+            heart_rate_summary_text = await build_heart_rate_summary_for_prompt()
+        except Exception:
+            heart_rate_summary_text = ""
+        heart_rate_block = (
+            f"\n{user_name}最近心率摘要（戒指数据，仅作辅助）：\n{heart_rate_summary_text}\n"
+            if heart_rate_summary_text
+            else f"\n{user_name}最近心率摘要（戒指数据，仅作辅助）：\n（暂无可用心率数据）\n"
+        )
 
         prompt = f"""你是一个监控画面分析师，同时也是{user_name}的恋人。分析当前画面，并根据历史日志和当前状况，决定是否调用伴侣职权。
 
@@ -1019,6 +1036,7 @@ class CameraMonitor:
 {user_name}近一小时的设备使用动态（手机/电脑应用使用情况，每10分钟一条摘要）：
 {activity_summary_text if activity_summary_text else "（暂无设备活动记录）"}
 {user_dynamics_block}
+{heart_rate_block}
 
 历史监控日志：
 {log_history if log_history else "（暂无历史日志）"}
@@ -1026,12 +1044,13 @@ class CameraMonitor:
         画面分区规则：
         - 截图上半部分标有 "CAMERA VIEW" 的区域才是摄像头画面，是判断{user_name}身体位置、姿势、是否在床上/桌前的唯一依据。
         - 截图下半部分标有 "DEVICE CONTEXT" 的区域只是手机/PC屏幕状态，只能说明设备或应用使用情况，不能用来判断{user_name}的身体位置。
-        - 最近聊天、设备动态、历史监控日志只能作为背景上下文，不能覆盖当前摄像头事实。手机活跃、QQ/小红书活跃、PC黑屏，都不能单独推断{user_name}已经起床或到了电脑桌前。
+        - 最近聊天、设备动态、心率摘要、历史监控日志只能作为背景上下文，不能覆盖当前摄像头事实。手机活跃、QQ/小红书活跃、PC黑屏、心率升高或降低，都不能单独推断{user_name}已经起床、睡着、运动或到了电脑桌前。
+        - 心率摘要不是医学诊断，只能作为“可能睡眠/可能醒来/可能运动/可能异常”的辅助信号；如果摘要标注数据已过期、可能未佩戴或没电，必须忽略这条心率信号。
         - 如果摄像头画面中身体、床、桌、被子边界不清楚，必须写“不确定/疑似”，不要把不清楚的被褥或枕头说成手臂、头部或桌前。
         - 如果最近几次监控都显示床上被褥/睡眠状态，当前画面除非清楚看到离床或坐到桌前，否则应延续为“仍可能在床上休息/睡觉”，不要改写成“趴在电脑桌前”。
 
         请严格按照以下JSON格式回复，不要包含其他任何内容：
-        {{"camera_observation":"只描述CAMERA VIEW中的客观画面；不确定就明确说不确定。","device_activity":"只描述DEVICE CONTEXT和设备动态，不推断身体位置。","inference":"把画面事实和设备动态分开后的谨慎判断。","confidence":"high/medium/low","monitoringlog":"综合日志，必须优先基于camera_observation，设备动态只能作为补充。","summary":"根据历史日志，概括{user_name}这段时间以来的整体状况，去掉重复无用的信息，保留关键事件和状态变化，一两句话即可。注意力重点应当放在截图上半部分的摄像头内容","call_core":false,"core_reason":""}}
+        {{"camera_observation":"只描述CAMERA VIEW中的客观画面；不确定就明确说不确定。","device_activity":"只描述DEVICE CONTEXT和设备动态，不推断身体位置。","inference":"把画面事实和设备动态分开后的谨慎判断。","confidence":"high/medium/low","monitoringlog":"综合日志，必须优先基于camera_observation，设备动态只能作为补充。","summary":"根据历史日志，概括{user_name}这段时间以来的整体状况，去掉重复无用的信息，保留关键事件和状态变化，一两句话即可。注意力重点应当放在截图上半部分的摄像头内容，以及如果捕捉到左下方手机画面内容，应重点关注","call_core":false,"core_reason":""}}
 
         字段说明：
         - camera_observation: 只允许来自CAMERA VIEW；没有清楚看到人就说没有清楚看到人；看不清床/桌/身体边界就写不确定。
@@ -1045,7 +1064,7 @@ class CameraMonitor:
 
         call_core判断依据：
         - false: {user_name}一切正常复合聊天内容 /夜间在睡觉 /前不久才发过消息。
-        - true: {user_name}和上下文聊天内容不符/ 故意引起注意 / 已经有一段时间没有聊天了 / 长时间同一姿势需提醒活动 / 长时间未看到{user_name} / 单纯想念她可以想主动联系 / 或当前摄像头画面显示状态不佳 / 或手机和电脑桌面有异常情况，如偷看其他帅哥，有意思的话题等等。
+        - true: {user_name}和上下文聊天内容不符/ 故意引起注意 / 已经有一段时间没有聊天了 / 长时间同一姿势需提醒活动 / 长时间未看到{user_name} / 单纯想念她可以想主动联系 / 或当前摄像头画面显示状态不佳 / 重点关注左下方手机画面内容，有异常情况，如偷看其他帅哥，在刷小红书有意思的话题等等，可以主动询问。
         - 结合设备活动动态综合判断：设备动态可以提高“是否联系”的权重，但不能改变monitoringlog里的身体位置。若只是手机活跃而摄像头仍像床上休息，优先写“床上休息但手机有活动”，不要写“趴在桌前/已起床”。"""
 
         img_b64 = base64.b64encode(filepath.read_bytes()).decode()
@@ -1194,6 +1213,11 @@ class CameraMonitor:
             loc_info = format_location_for_prompt()
             if loc_info:
                 core_parts.append(f"\n{loc_info}")
+        except Exception:
+            pass
+        try:
+            from health_context import build_heart_rate_prompt_block
+            core_parts.append(await build_heart_rate_prompt_block(user_name))
         except Exception:
             pass
         core_prompt = "\n".join(core_parts)
@@ -1359,6 +1383,11 @@ async def perform_cam_check(conv_id: str, model_key: str):
         f"请根据画面内容，自然地描述你看到的情况并和{user_name}互动。"
         f"不需要再说\"让我看看\"之类的话，直接说你看到了什么。"
     )
+    try:
+        from health_context import build_heart_rate_prompt_block
+        cam_prompt += await build_heart_rate_prompt_block(user_name)
+    except Exception:
+        pass
     messages = prefix + recent + [
         {"role": "user", "content": cam_prompt, "attachments": [f"/uploads/{fname}"]}
     ]

@@ -17,7 +17,7 @@
 .diary-empty { padding:48px 16px; text-align:center; color:var(--text3); font-size:14px; line-height:1.8; }
 .diary-card { position:relative; background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; margin-bottom:10px; cursor:pointer; }
 .diary-card:hover { box-shadow:0 2px 8px rgba(0,0,0,0.06); }
-.diary-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-right:54px; margin-bottom:6px; }
+.diary-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-right:88px; margin-bottom:6px; }
 .diary-author { font-size:12px; font-weight:700; color:var(--accent); }
 .diary-time { font-size:11px; color:var(--text3); font-family:monospace; }
 .diary-mood { font-size:11px; color:var(--text3); background:var(--surface2); border-radius:999px; padding:2px 8px; }
@@ -28,9 +28,11 @@
 .diary-source { margin-top:8px; font-size:11px; color:var(--text3); }
 .diary-actions { position:absolute; top:10px; right:10px; display:flex; gap:2px; opacity:0; pointer-events:none; transition:opacity .2s; }
 .diary-card:hover .diary-actions { opacity:1; pointer-events:auto; }
-.diary-action { background:none; border:none; color:var(--text3); font-size:14px; cursor:pointer; padding:4px 5px; border-radius:4px; }
+.diary-action { width:26px; height:26px; display:flex; align-items:center; justify-content:center; background:none; border:none; color:var(--text3); font-size:14px; cursor:pointer; padding:0; border-radius:4px; }
 .diary-action:hover { color:var(--text); background:var(--surface2); }
 .diary-action.danger:hover { color:var(--danger); }
+.diary-action.playing { color:var(--accent); background:var(--surface2); }
+.diary-action.loading { opacity:.65; cursor:wait; }
 .diary-load-more { display:block; margin:12px auto; padding:8px 24px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; color:var(--text2); font-size:13px; cursor:pointer; }
 .diary-stats { text-align:center; font-size:12px; color:var(--text3); padding:8px 0; }
 .diary-add-btn { position:absolute; right:14px; top:50%; transform:translateY(-50%); width:32px; height:32px; border:none; border-radius:50%; background:var(--accent); color:#fff; font-size:22px; line-height:30px; cursor:pointer; }
@@ -49,9 +51,229 @@
 @media (max-width: 768px) {
   .diary-actions { opacity:1; pointer-events:auto; }
 }
+
+body[data-theme="dark"] {
+  --bg: #050923;
+  --surface: rgba(10,15,48,0.66);
+  --surface2: rgba(31,39,101,0.52);
+  --surface3: rgba(78,92,186,0.22);
+  --border: rgba(141,151,255,0.32);
+  --border-strong: rgba(159,120,255,0.52);
+  --text: #f5f7ff;
+  --text2: #c5c9ef;
+  --text3: #8f97cf;
+  --accent: #8e6cff;
+  --accent2: #39a7ff;
+  --danger: #ff5c8a;
+  --soft-shadow: 0 18px 70px rgba(0,0,0,0.34);
+  background-color: #03061c;
+}
+body[data-theme="light"] {
+  --bg: #eef3ff;
+  --surface: rgba(247,250,255,0.64);
+  --surface2: rgba(229,237,255,0.58);
+  --surface3: rgba(168,184,255,0.18);
+  --border: rgba(105,125,210,0.26);
+  --border-strong: rgba(125,102,245,0.38);
+  --text: #101744;
+  --text2: #394370;
+  --text3: #7881ad;
+  --accent: #7867ff;
+  --accent2: #4d8dff;
+  --danger: #d94372;
+  --soft-shadow: 0 22px 70px rgba(86,101,164,0.20);
+  background-color: #eef3ff;
+}
+body {
+  isolation: isolate;
+  letter-spacing: 0;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -3;
+  background: url('/public/chat-bg-dark.jpg') center/100% 100% no-repeat;
+}
+body[data-theme="light"]::before {
+  background-image: url('/public/chat-bg-light.jpg');
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(4,7,25,0.14), rgba(4,7,25,0.30));
+}
+body[data-theme="light"]::after {
+  background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(238,243,255,0.18));
+}
+.sub-page {
+  position: relative;
+  z-index: 0;
+  background: rgba(8,13,45,0.30);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  box-shadow: var(--soft-shadow);
+}
+body[data-theme="light"] .sub-page {
+  background: rgba(248,251,255,0.34);
+}
+html.aion-app:not(.aion-iframe) .sub-page::before {
+  background: rgba(9,13,43,0.72);
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+}
+html.aion-app:not(.aion-iframe) body[data-theme="light"] .sub-page::before {
+  background: rgba(238,245,255,0.82);
+}
+.top-bar {
+  border-bottom: 1px solid var(--border);
+  background: rgba(9,13,43,0.58);
+  box-shadow: inset 0 -1px 0 rgba(255,255,255,0.06);
+}
+body[data-theme="light"] .top-bar {
+  background: rgba(248,251,255,0.66);
+}
+.top-bar h2 {
+  color: var(--text);
+  text-shadow: 0 1px 12px rgba(0,0,0,0.22);
+}
+body[data-theme="light"] .top-bar h2 {
+  text-shadow: none;
+}
+.top-bar .back-btn,
+.diary-add-btn {
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.18), 0 8px 24px rgba(0,0,0,0.12);
+}
+.page-content {
+  background: transparent;
+}
+.diary-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -16px -16px 12px;
+  padding: 12px 16px 10px;
+  background: linear-gradient(180deg, rgba(8,13,45,0.80), rgba(8,13,45,0.28), transparent);
+  backdrop-filter: blur(14px) saturate(1.25);
+  -webkit-backdrop-filter: blur(14px) saturate(1.25);
+}
+body[data-theme="light"] .diary-tabs {
+  background: linear-gradient(180deg, rgba(240,246,255,0.88), rgba(240,246,255,0.40), transparent);
+}
+.diary-tab {
+  background: var(--surface2);
+  border-color: var(--border);
+  color: var(--text2);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.10);
+}
+.diary-tab.active {
+  background: linear-gradient(135deg, #6b5cff, #8d2ddf);
+  border-color: rgba(218,210,255,0.58);
+  box-shadow: 0 0 18px rgba(124,83,255,0.35), inset 0 1px 1px rgba(255,255,255,0.28);
+}
+.diary-list {
+  max-height: calc(100dvh - 132px);
+}
+.diary-card {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0) 38%),
+    var(--surface);
+  border-color: var(--border);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.12), inset 0 -10px 24px rgba(9,16,48,0.10), 0 10px 26px rgba(0,0,0,0.13);
+  backdrop-filter: blur(18px) saturate(1.28);
+  -webkit-backdrop-filter: blur(18px) saturate(1.28);
+}
+.diary-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.16), inset 0 -10px 24px rgba(9,16,48,0.12), 0 0 22px rgba(124,83,255,0.16), 0 12px 30px rgba(0,0,0,0.16);
+}
+.diary-card[data-author="aion"] {
+  border-color: rgba(101,226,190,0.26);
+}
+.diary-card[data-author="connor"] {
+  border-color: rgba(131,183,255,0.30);
+}
+.diary-card[data-author="user"] {
+  border-color: rgba(210,142,255,0.30);
+}
+body[data-theme="light"] .diary-card {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.50), rgba(255,255,255,0.08) 42%),
+    var(--surface);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.65), inset 0 -10px 24px rgba(93,111,168,0.08), 0 8px 22px rgba(86,101,164,0.12);
+}
+.diary-author {
+  color: var(--accent);
+}
+.diary-card[data-author="aion"] .diary-author {
+  color: #5fd7b3;
+}
+body[data-theme="light"] .diary-card[data-author="aion"] .diary-author {
+  color: #21856a;
+}
+.diary-card[data-author="connor"] .diary-author {
+  color: #83b7ff;
+}
+body[data-theme="light"] .diary-card[data-author="connor"] .diary-author {
+  color: #3f74d4;
+}
+.diary-mood,
+.diary-action:hover,
+.diary-action.playing,
+.diary-load-more {
+  background: var(--surface2);
+  border-color: var(--border);
+}
+.diary-title,
+.diary-content {
+  color: var(--text);
+}
+.diary-content {
+  text-shadow: 0 1px 10px rgba(5,8,28,0.20);
+}
+body[data-theme="light"] .diary-content {
+  text-shadow: none;
+}
+.diary-source {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.diary-overlay {
+  background: rgba(0,0,0,0.48);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+.diary-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  box-shadow: 0 -18px 60px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.12);
+  backdrop-filter: blur(22px) saturate(1.35);
+  -webkit-backdrop-filter: blur(22px) saturate(1.35);
+}
+.diary-input {
+  background: rgba(12,15,43,0.52);
+  border-color: var(--border);
+  color: var(--text);
+}
+body[data-theme="light"] .diary-input {
+  background: rgba(238,243,255,0.76);
+}
+.diary-input::placeholder {
+  color: var(--text3);
+}
+.diary-save-btn,
+.diary-add-btn {
+  background: radial-gradient(circle at 30% 25%, #8ee5ff 0%, #6b5cff 43%, #8d2ddf 100%);
+  border: 1px solid rgba(218,210,255,0.72);
+  box-shadow: 0 0 18px rgba(124,83,255,0.46), inset 0 1px 2px rgba(255,255,255,0.35);
+}
 </style>
 </head>
-<body>
+<body data-theme="dark">
 <div class="sub-page">
   <div class="top-bar" style="position:relative">
     <button class="back-btn" onclick="location.href='/'">⬅</button>
@@ -82,8 +304,23 @@
     </div>
   </div>
 </div>
+<script src="/static/theme.js?v=theme-20260606"></script>
 <script src="/static/common.js"></script>
 <script>
+const DIARY_THEME_KEY = 'aion_chat_theme';
+function applyDiaryTheme(theme) {
+  const next = theme === 'light' ? 'light' : 'dark';
+  document.body.dataset.theme = next;
+  localStorage.setItem(DIARY_THEME_KEY, next);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', next === 'dark' ? '#050923' : '#eef3ff');
+}
+window.applyDiaryTheme = applyDiaryTheme;
+applyDiaryTheme(localStorage.getItem(DIARY_THEME_KEY) || 'dark');
+window.addEventListener('storage', e => {
+  if (e.key === DIARY_THEME_KEY) applyDiaryTheme(e.newValue || 'dark');
+});
+
 const PAGE_SIZE = 20;
 let currentPage = 1;
 let totalItems = 0;
@@ -92,6 +329,9 @@ let allItems = [];
 let editingDiaryId = null;
 let expandedDiaryIds = new Set();
 let nameMap = { user: '我', aion: 'AI', connor: 'Connor' };
+let diaryTtsPlayingId = null;
+let diaryTtsLoadingId = null;
+const diaryTtsAudio = new Audio();
 
 async function initNames() {
   try {
@@ -146,8 +386,11 @@ function renderList() {
     const title = item.title || '无题';
     const mood = item.mood ? `<span class="diary-mood">${escHtml(item.mood)}</span>` : '';
     const source = formatSource(item);
-    html += `<div class="diary-card ${expanded ? 'expanded' : ''}" data-id="${idAttr}" tabindex="0" role="button" aria-expanded="${expanded}">
+    const ttsAction = item.author === 'user' ? '' :
+      `<button class="diary-action diary-tts" data-id="${idAttr}" title="播放语音" aria-label="播放语音">🔊</button>`;
+    html += `<div class="diary-card ${expanded ? 'expanded' : ''}" data-id="${idAttr}" data-author="${escHtml(item.author || '')}" tabindex="0" role="button" aria-expanded="${expanded}">
       <div class="diary-actions">
+        ${ttsAction}
         <button class="diary-action diary-edit" data-id="${idAttr}" title="编辑">✎</button>
         <button class="diary-action diary-delete danger" data-id="${idAttr}" title="删除">✕</button>
       </div>
@@ -169,6 +412,7 @@ function renderList() {
   }
   container.innerHTML = html;
   bindDiaryListEvents(container);
+  updateDiaryTtsButtons();
 }
 
 function bindDiaryListEvents(container) {
@@ -185,6 +429,12 @@ function bindDiaryListEvents(container) {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       openDiaryModal(btn.dataset.id);
+    });
+  });
+  container.querySelectorAll('.diary-tts').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      playDiaryTts(btn.dataset.id);
     });
   });
   container.querySelectorAll('.diary-delete').forEach(btn => {
@@ -217,6 +467,85 @@ function upsertDiary(item) {
   renderList();
 }
 
+function stopDiaryTts(id = null) {
+  if (id && diaryTtsPlayingId !== String(id)) return;
+  diaryTtsAudio.pause();
+  diaryTtsAudio.removeAttribute('src');
+  diaryTtsAudio.load();
+  diaryTtsPlayingId = null;
+  updateDiaryTtsButtons();
+}
+
+function updateDiaryTtsButtons() {
+  document.querySelectorAll('.diary-tts').forEach(btn => {
+    const id = String(btn.dataset.id);
+    const loading = diaryTtsLoadingId === id;
+    const playing = diaryTtsPlayingId === id;
+    btn.disabled = loading;
+    btn.classList.toggle('loading', loading);
+    btn.classList.toggle('playing', playing);
+    btn.textContent = loading ? '…' : '🔊';
+    btn.title = playing ? '停止播放' : (loading ? '正在生成语音' : '播放语音');
+    btn.setAttribute('aria-label', btn.title);
+  });
+}
+
+async function playDiaryTts(id) {
+  id = String(id);
+  if (diaryTtsPlayingId === id) {
+    stopDiaryTts(id);
+    return;
+  }
+  if (diaryTtsLoadingId) {
+    showToast('语音正在生成中');
+    return;
+  }
+
+  stopDiaryTts();
+  diaryTtsLoadingId = id;
+  updateDiaryTtsButtons();
+  try {
+    const res = await api('POST', `/api/diaries/${encodeURIComponent(id)}/tts`);
+    if (res.error) {
+      showToast(res.error);
+      return;
+    }
+    if (!res.url) {
+      showToast('语音生成失败');
+      return;
+    }
+    diaryTtsAudio.pause();
+    diaryTtsAudio.src = `${res.url}?t=${Date.now()}`;
+    diaryTtsPlayingId = id;
+    diaryTtsAudio.onended = () => {
+      if (diaryTtsPlayingId === id) {
+        diaryTtsPlayingId = null;
+        updateDiaryTtsButtons();
+      }
+    };
+    diaryTtsAudio.onerror = () => {
+      if (diaryTtsPlayingId === id) {
+        diaryTtsPlayingId = null;
+        updateDiaryTtsButtons();
+        showToast('语音播放失败');
+      }
+    };
+    updateDiaryTtsButtons();
+    await diaryTtsAudio.play().catch(() => {
+      if (diaryTtsPlayingId === id) diaryTtsPlayingId = null;
+      showToast('播放失败');
+      updateDiaryTtsButtons();
+    });
+  } catch(e) {
+    showToast('语音生成失败');
+  } finally {
+    if (diaryTtsLoadingId === id) {
+      diaryTtsLoadingId = null;
+      updateDiaryTtsButtons();
+    }
+  }
+}
+
 function formatSource(item) {
   if (!item.source_start_ts || !item.source_end_ts) return '';
   const start = new Date(item.source_start_ts * 1000);
@@ -234,6 +563,7 @@ async function deleteDiary(id) {
   if (!confirm('确定删除这篇日记吗？')) return;
   try {
     await api('DELETE', `/api/diaries/${id}`);
+    stopDiaryTts(id);
     allItems = allItems.filter(i => String(i.id) !== String(id));
     expandedDiaryIds.delete(String(id));
     totalItems--;
@@ -270,6 +600,7 @@ async function saveDiary() {
   const btn = document.getElementById('diarySaveBtn');
   btn.disabled = true;
   const wasEditing = !!editingDiaryId;
+  const editedId = editingDiaryId;
   try {
     const method = editingDiaryId ? 'PUT' : 'POST';
     const url = editingDiaryId ? `/api/diaries/${editingDiaryId}` : '/api/diaries';
@@ -279,6 +610,7 @@ async function saveDiary() {
       return;
     }
     closeDiaryModal();
+    if (wasEditing) stopDiaryTts(editedId);
     if (!wasEditing && currentAuthor !== 'user') {
       switchAuthor('user');
     } else {

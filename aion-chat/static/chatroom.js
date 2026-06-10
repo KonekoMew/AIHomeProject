@@ -1,6 +1,7 @@
 /* ── Aion 聊天室前端逻辑 ── */
 
 const API = '/api/chatroom';
+const CHATROOM_THEME_KEY = 'aion_chat_theme';
 let currentRoom = null;
 let rooms = [];
 let isSending = false;
@@ -14,6 +15,28 @@ let pendingAttachments = [];  // [{url, type, name}]
 let crMessagesById = {};
 let memSourceMemId = null;
 let memSourceMessages = [];
+let chatroomDailyCompressReview = null;
+let crMsgDebugData = {};
+let crSystemLogs = [];
+let crSysLogHasUnreadError = false;
+
+function applyChatroomTheme(theme) {
+  const next = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  document.body.dataset.theme = next;
+  document.documentElement.style.backgroundColor = next === 'dark' ? '#03061c' : '#eef3ff';
+  localStorage.setItem(CHATROOM_THEME_KEY, next);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', next === 'dark' ? '#050923' : '#eef3ff');
+  if (window.AionStatusBar) window.AionStatusBar.setBarStyle(next);
+}
+
+window.applyChatroomTheme = applyChatroomTheme;
+applyChatroomTheme(localStorage.getItem(CHATROOM_THEME_KEY) || 'dark');
+
+window.addEventListener('storage', (e) => {
+  if (e.key === CHATROOM_THEME_KEY) applyChatroomTheme(e.newValue || 'dark');
+});
 
 // ── 密语模式 ──
 let crWhisperMode = false;
@@ -27,16 +50,16 @@ const AVATARS = {
 
 let crUserName = '我';
 let crAiName = 'AI';
-let crConnorName = 'Connor';
+let crConnorName = '第二AI';
 
 function crName(sender) {
-  return { user: crUserName || '我', aion: crAiName || 'AI', connor: crConnorName || 'Connor' }[sender] || sender;
+  return { user: crUserName || '我', aion: crAiName || 'AI', connor: crConnorName || '第二AI' }[sender] || sender;
 }
 
 function applyChatroomNames(cfg = {}) {
   crAiName = cfg.ai_name || crAiName || 'AI';
   crUserName = cfg.user_name || crUserName || '我';
-  crConnorName = cfg.connor_name || crConnorName || 'Connor';
+  crConnorName = cfg.connor_name || crConnorName || '第二AI';
 
   const aionVoice = document.getElementById('setTtsAionVoice');
   if (aionVoice?.previousElementSibling) aionVoice.previousElementSibling.textContent = `${crAiName} 音色`;
@@ -213,7 +236,7 @@ const _ttsEngine = (function() {
 let crTtsAudio = _ttsEngine.audio;
 
 // ── 音乐卡片 ──
-let crMusicCards = {}; // { msgId: [{ id, name, artist, album, cover, audio_url, candidates }] }
+let crMusicCards = {}; // { msgId: [{ id, name, artist, cover, audio_url }] }
 
 // ── 密语胶囊 ──
 function crToyLabel(cmd) {
@@ -294,31 +317,21 @@ function crBuildMusicCardHtml(song) {
   const cover = song.cover ? esc(song.cover) : '';
   const coverImg = cover
     ? `<img class="music-cover" src="${cover}" alt="">`
-    : `<div class="music-cover" style="display:flex;align-items:center;justify-content:center;font-size:24px;color:var(--text3)">🎵</div>`;
+    : `<div class="music-cover" style="display:flex;align-items:center;justify-content:center;font-size:20px;color:var(--text3)">🎵</div>`;
   const name = esc(song.name || '未知歌曲');
   const artist = esc(song.artist || '未知歌手');
-  const album = song.album ? `<div class="music-album">💿 ${esc(song.album)}</div>` : '';
   const songId = song.id;
   const onlineBtn = `<button class="music-btn secondary" onclick="crPlayMusicOnline(${songId})">▶ 在线播放</button>`;
-  let candidatesHtml = '';
-  if (song.candidates && song.candidates.length) {
-    const items = song.candidates.map(c =>
-      `<div class="cand-item" onclick="crOpenInNetease(${c.id})">🎵 ${esc(c.name)} - ${esc(c.artist)}</div>`
-    ).join('');
-    candidatesHtml = `<details class="music-candidates"><summary>不是这首？看看其他结果</summary>${items}</details>`;
-  }
   return `
     <div class="music-card">
       ${coverImg}
       <div class="music-info">
         <div class="music-name">${name}</div>
         <div class="music-artist">${artist}</div>
-        ${album}
         <div class="music-btns">
-          <button class="music-btn primary" onclick="crOpenInNetease(${songId})">🎶 网易云播放</button>
+          <button class="music-btn primary" onclick="crOpenInNetease(${songId})">🎶 网易云</button>
           ${onlineBtn}
         </div>
-        ${candidatesHtml}
       </div>
     </div>`;
 }
@@ -525,8 +538,6 @@ const roomTitleEl = document.getElementById('roomTitle');
 const menuBtn = document.getElementById('menuBtn');
 const sidebar = document.getElementById('sidebar');
 const backdrop = document.getElementById('sidebarBackdrop');
-const connorDot = document.getElementById('connorDot');
-const connorStatusEl = document.getElementById('connorStatus');
 const aiChatBtn = document.getElementById('aiChatBtn');
 const replyAionBtn = document.getElementById('replyAionBtn');
 const replyConnorBtn = document.getElementById('replyConnorBtn');
@@ -591,6 +602,181 @@ async function api(path, opts = {}) {
     ...opts,
   });
   return resp.json();
+}
+
+function crHandleDebug(data) {
+  const d = data?.data && data.data.type === 'debug' ? data.data : data;
+  if (!d || d.type !== 'debug') return;
+  if (d.room_id && currentRoom && d.room_id !== currentRoom.id) return;
+  if (d.msg_id) crMsgDebugData[d.msg_id] = d;
+  crAddSystemLog(d);
+}
+
+function crAddSystemLog(d) {
+  if (!d) return;
+  if (d.msg_id && crSystemLogs.some(log => log.msg_id === d.msg_id)) return;
+  const now = new Date();
+  const ts = String(now.getHours()).padStart(2, '0') + ':' +
+    String(now.getMinutes()).padStart(2, '0') + ':' +
+    String(now.getSeconds()).padStart(2, '0');
+  crSystemLogs.unshift({ ...d, _ts: ts, _id: 'cr_slog_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6) });
+  if (d.has_error) {
+    crSysLogHasUnreadError = true;
+    document.getElementById('crSysLogBtn')?.classList.add('cr-syslog-btn-flash');
+  }
+  crRenderSystemLogList();
+}
+
+function crFixed(value, digits = 4) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(digits) : (0).toFixed(digits);
+}
+
+function crBuildTokenHtml(u) {
+  if (!u) return '🔤 token 无数据';
+  const raw = u.raw;
+  const parts = [];
+  if (raw) {
+    if ('promptTokenCount' in raw) {
+      parts.push(`<span class="tok-label">输入:</span><span class="tok-value">${raw.promptTokenCount || 0}</span>`);
+      if (raw.thoughtsTokenCount) parts.push(`<span class="tok-label">思考:</span><span class="tok-value tok-thinking">${raw.thoughtsTokenCount}</span>`);
+      if (raw.cachedContentTokenCount) parts.push(`<span class="tok-label">缓存:</span><span class="tok-value tok-cached">${raw.cachedContentTokenCount}</span>`);
+      parts.push(`<span class="tok-label">输出:</span><span class="tok-value">${raw.candidatesTokenCount || 0}</span>`);
+      if (raw.toolUsePromptTokenCount) parts.push(`<span class="tok-label">工具:</span><span class="tok-value">${raw.toolUsePromptTokenCount}</span>`);
+      parts.push(`<span class="tok-label">总计:</span><span class="tok-value">${raw.totalTokenCount || 0}</span>`);
+    } else if ('prompt_tokens' in raw) {
+      parts.push(`<span class="tok-label">输入:</span><span class="tok-value">${raw.prompt_tokens || 0}</span>`);
+      if (raw.prompt_tokens_details?.cached_tokens) parts.push(`<span class="tok-label">缓存:</span><span class="tok-value tok-cached">${raw.prompt_tokens_details.cached_tokens}</span>`);
+      parts.push(`<span class="tok-label">输出:</span><span class="tok-value">${raw.completion_tokens || 0}</span>`);
+      if (raw.completion_tokens_details?.reasoning_tokens) parts.push(`<span class="tok-label">推理:</span><span class="tok-value tok-thinking">${raw.completion_tokens_details.reasoning_tokens}</span>`);
+      parts.push(`<span class="tok-label">总计:</span><span class="tok-value">${raw.total_tokens || 0}</span>`);
+    } else if ('input_tokens' in raw || 'output_tokens' in raw) {
+      const input = raw.input_tokens || 0;
+      const output = raw.output_tokens || 0;
+      parts.push(`<span class="tok-label">输入:</span><span class="tok-value">${input}</span>`);
+      parts.push(`<span class="tok-label">输出:</span><span class="tok-value">${output}</span>`);
+      parts.push(`<span class="tok-label">总计:</span><span class="tok-value">${raw.total_tokens || input + output}</span>`);
+    }
+  }
+  if (parts.length === 0) {
+    parts.push(`<span class="tok-label">输入:</span><span class="tok-value">${u.prompt_tokens || 0}</span>`);
+    parts.push(`<span class="tok-label">输出:</span><span class="tok-value">${u.completion_tokens || 0}</span>`);
+    parts.push(`<span class="tok-label">总计:</span><span class="tok-value">${u.total_tokens || 0}</span>`);
+  }
+  return '🔤 ' + parts.join(' ');
+}
+
+function crBuildTokenDetailHtml(u) {
+  if (!u || !u.raw) return '';
+  let html = '<h4>🔤 Token 用量详情（服务器原始数据）</h4><div class="cr-syslog-token-raw">';
+  for (const [k, v] of Object.entries(u.raw)) {
+    if (v === null || v === undefined) continue;
+    const val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    html += `<div><span class="tok-label">${esc(k)}:</span> <span class="tok-value">${esc(val)}</span></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function crRenderSystemLogList() {
+  const el = document.getElementById('crSysLogList');
+  const countEl = document.getElementById('crSysLogCount');
+  if (!el) return;
+  if (countEl) countEl.textContent = `共 ${crSystemLogs.length} 条（刷新后清空）`;
+  if (crSystemLogs.length === 0) {
+    el.innerHTML = '<div class="cr-syslog-empty">暂无日志</div>';
+    return;
+  }
+
+  el.innerHTML = crSystemLogs.map(d => {
+    const tokenText = crBuildTokenHtml(d.usage);
+    const isError = !!d.has_error;
+    const mems = Array.isArray(d.recalled_memories) ? d.recalled_memories : [];
+    const memText = mems.length ? `🧠 召回 ${mems.length} 条记忆` : '🧠 无相关记忆';
+    const memCls = mems.length ? 'cr-syslog-mem' : 'cr-syslog-mem none';
+    const detailId = 'crsd_' + d._id;
+    let detailHtml = '';
+
+    if (isError && d.error_text) {
+      detailHtml += `<div style="color:#f44336;margin-bottom:8px;word-break:break-all;">⚠️ ${esc(d.error_text)}</div>`;
+    }
+    detailHtml += crBuildTokenDetailHtml(d.usage);
+    if (d.is_search_needed !== undefined) {
+      const searchTag = d.is_search_needed ? '<span style="color:#4caf50">✅ 需要搜索</span>' : '<span style="color:#ff9800">⏭️ 无需搜索</span>';
+      detailHtml += `<div class="debug-recall-keywords">前置哨兵判断: ${searchTag}</div>`;
+    }
+    if (d.recall_topic) {
+      detailHtml += `<div class="debug-recall-keywords">📌 话题: <span style="color:#4fc3f7">${esc(d.recall_topic)}</span></div>`;
+    }
+    if (d.recall_keywords) {
+      detailHtml += `<div class="debug-recall-keywords">🏷️ 关键词: ${esc(d.recall_keywords)}</div>`;
+    }
+    if (d.recall_query) {
+      detailHtml += `<h4>🔍 向量匹配查询</h4><div class="debug-recall-query">${esc(d.recall_query)}</div>`;
+    }
+    const top6 = Array.isArray(d.debug_top6) ? d.debug_top6 : [];
+    if (top6.length) {
+      const topItems = top6.map(m => {
+        const score = Number(m.score || 0);
+        const passed = score >= 0.45;
+        return `<div class="debug-mem-item ${passed ? '' : 'below-threshold'}"><span class="score">${crFixed(score)}</span><span class="score-detail">vec:${crFixed(m.vec_sim, 3)} kw:${crFixed(m.kw_score, 3)} imp:${crFixed(m.importance, 2)}</span><span class="content">${esc(m.content || '')}</span>${!passed ? '<span class="threshold-tag">未达标</span>' : ''}</div>`;
+      }).join('');
+      detailHtml += `<h4>📊 记忆库 Top6 得分 (阈值 0.45)</h4>${topItems}`;
+    }
+    if (mems.length) {
+      const memItems = mems.map(m => `<div class="debug-mem-item"><span class="score">${crFixed(m.score)}</span><span class="type">${esc(m.type || '')}</span><span class="content">${esc(m.content || '')}</span></div>`).join('');
+      detailHtml += `<h4>🧠 实际召回记忆 (${mems.length} 条)</h4>${memItems}`;
+    }
+    const prompts = Array.isArray(d.prompt_messages) ? d.prompt_messages : [];
+    if (prompts.length) {
+      const pmItems = prompts.map(m => {
+        const roleCls = m.role === 'user' ? 'user' : 'assistant';
+        return `<div class="debug-prompt-item"><span class="debug-prompt-role ${roleCls}">[${esc(m.role || '')}]</span> <span class="debug-prompt-text">${esc(m.content || '')}</span></div>`;
+      }).join('');
+      detailHtml += `<h4>📝 完整 Prompt (${d.prompt_count || prompts.length} 条)</h4><div class="debug-prompt-list">${pmItems}</div>`;
+    }
+
+    const hasDetail = detailHtml.length > 0;
+    const errorTag = isError ? '<span class="cr-syslog-error-tag">❌ 错误</span>' : '';
+    const entryCls = isError ? 'cr-syslog-entry error-entry' : 'cr-syslog-entry';
+    return `<div class="${entryCls}">
+      <span class="cr-syslog-time">${d._ts}</span>
+      ${errorTag}
+      <span class="cr-syslog-model">📦 ${esc(d.model || '?')}</span>
+      <span class="cr-syslog-tokens">${tokenText}</span>
+      <span class="${memCls}">${memText}</span>
+      ${hasDetail ? `<button class="cr-syslog-detail-toggle" onclick="crToggleSysLogDetail('${detailId}')">详情 ▾</button>` : ''}
+      ${hasDetail ? `<div class="cr-syslog-detail" id="${detailId}">${detailHtml}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function crToggleSysLogDetail(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.toggle('show');
+  const btn = el.previousElementSibling;
+  if (btn && btn.classList.contains('cr-syslog-detail-toggle')) {
+    btn.textContent = el.classList.contains('show') ? '收起 ▴' : '详情 ▾';
+  }
+}
+
+function crOpenSystemLog() {
+  crSysLogHasUnreadError = false;
+  document.getElementById('crSysLogBtn')?.classList.remove('cr-syslog-btn-flash');
+  crRenderSystemLogList();
+  document.getElementById('crSysLogModal')?.classList.add('show');
+}
+
+function crCloseSystemLog() {
+  document.getElementById('crSysLogModal')?.classList.remove('show');
+}
+
+function crClearSystemLog() {
+  crSystemLogs = [];
+  crSysLogHasUnreadError = false;
+  document.getElementById('crSysLogBtn')?.classList.remove('cr-syslog-btn-flash');
+  crRenderSystemLogList();
 }
 
 async function fetchCurrentModel() {
@@ -791,6 +977,96 @@ function crMsgSelector(msgId) {
   return `[data-msg-id="${safeId}"]`;
 }
 
+const CR_LEGACY_COMMAND_SYSTEM_NOTICE_RE = /^(?:🎵\s+.+点了一首|(?:⏰|📅|👀)\s*【[^】]+】设定了|📷\s+.+查看了监控|📊\s+.+查看了用户动态|💾\s+.+记住了)/;
+
+function crIsAiSender(sender) {
+  return sender === 'aion' || sender === 'connor';
+}
+
+function crSystemNoticeAfterMsgId(m) {
+  if (!m || m.sender !== 'system' || !Array.isArray(m.attachments)) return '';
+  const marker = m.attachments.find(a => a && typeof a === 'object' && a.type === 'system_notice_order' && a.after_msg_id);
+  return marker ? String(marker.after_msg_id) : '';
+}
+
+function crIsLegacyCommandSystemNotice(m) {
+  if (!m || m.sender !== 'system' || crSystemNoticeAfterMsgId(m)) return false;
+  return CR_LEGACY_COMMAND_SYSTEM_NOTICE_RE.test((m.content || '').trim());
+}
+
+function crPreviousDisplaySender(msgs, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    const sender = msgs[i]?.sender;
+    if (sender && sender !== 'system') return sender;
+  }
+  return '';
+}
+
+function crMessagesForDisplay(msgs) {
+  const out = [];
+  const pendingById = new Map();
+  let pendingLegacyNotices = [];
+  const list = msgs || [];
+  const indexById = new Map(list.map((m, idx) => [m?.id, idx]));
+
+  function appendPendingFor(id) {
+    const pending = pendingById.get(id);
+    if (pending?.length) {
+      out.push(...pending);
+      pendingById.delete(id);
+    }
+    if (pendingLegacyNotices.length) {
+      out.push(...pendingLegacyNotices);
+      pendingLegacyNotices = [];
+    }
+  }
+
+  for (let idx = 0; idx < list.length; idx++) {
+    const m = list[idx];
+    const afterMsgId = crSystemNoticeAfterMsgId(m);
+    if (afterMsgId && indexById.has(afterMsgId) && idx < indexById.get(afterMsgId)) {
+      if (!pendingById.has(afterMsgId)) pendingById.set(afterMsgId, []);
+      pendingById.get(afterMsgId).push(m);
+      continue;
+    }
+
+    if (crIsLegacyCommandSystemNotice(m) && !crIsAiSender(crPreviousDisplaySender(list, idx))) {
+      pendingLegacyNotices.push(m);
+      continue;
+    }
+
+    if (pendingLegacyNotices.length && !crIsAiSender(m?.sender)) {
+      out.push(...pendingLegacyNotices);
+      pendingLegacyNotices = [];
+    }
+    out.push(m);
+    if (crIsAiSender(m?.sender)) appendPendingFor(m.id);
+  }
+  if (pendingLegacyNotices.length) out.push(...pendingLegacyNotices);
+  for (const pending of pendingById.values()) out.push(...pending);
+  return out;
+}
+
+function crSystemNoticeRowAfterMsgId(row) {
+  if (!row?.classList?.contains('system-event-msg')) return false;
+  return row.getAttribute('data-after-msg-id') || '';
+}
+
+function crMovePrecedingRelatedSystemNoticesAfter(row, msgId) {
+  if (!row) return;
+  const notices = [];
+  let prev = row.previousElementSibling;
+  while (prev?.classList?.contains('system-event-msg') && crSystemNoticeRowAfterMsgId(prev) === msgId) {
+    notices.unshift(prev);
+    prev = prev.previousElementSibling;
+  }
+  let anchor = row;
+  notices.forEach(notice => {
+    anchor.insertAdjacentElement('afterend', notice);
+    anchor = notice;
+  });
+}
+
 function crSearchSnippet(content, keyword) {
   const text = String(content || '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
@@ -896,7 +1172,7 @@ function renderMessages(msgs) {
     return;
   }
   msgs.forEach(m => { if (m.id) crMessagesById[m.id] = m; });
-  messagesEl.innerHTML = msgs.map(m => msgHTML(m)).join('');
+  messagesEl.innerHTML = crMessagesForDisplay(msgs).map(m => msgHTML(m)).join('');
 }
 
 function crMsgMenuHtml(sender, msgId) {
@@ -916,10 +1192,28 @@ function crMsgMenuHtml(sender, msgId) {
     </div>`;
 }
 
-function crMsgSenderLineHtml(sender, name, msgId) {
+function crCanRateAiMsg(msg) {
+  if (!msg?.id || !currentRoom) return false;
+  if (currentRoom.type === 'group') return msg.sender === 'aion' || msg.sender === 'connor';
+  if (currentRoom.type === 'connor_1v1') return msg.sender === 'connor';
+  return false;
+}
+
+function crMsgFeedbackHtml(msg) {
+  if (!crCanRateAiMsg(msg)) return '';
+  const likeActive = msg.ai_feedback_rating === 'like' ? 'active' : '';
+  const dislikeActive = msg.ai_feedback_rating === 'dislike' ? 'active' : '';
+  return `<span class="msg-feedback-actions">
+    <button class="msg-feedback-btn ${likeActive}" onclick="openCrMsgFeedback(event,'${msg.id}','like')" title="喜欢这条回复">👍</button>
+    <button class="msg-feedback-btn ${dislikeActive}" onclick="openCrMsgFeedback(event,'${msg.id}','dislike')" title="不喜欢这条回复">👎</button>
+  </span>`;
+}
+
+function crMsgSenderLineHtml(sender, name, msgId, msg = null) {
   const menuHtml = crMsgMenuHtml(sender, msgId);
+  const feedbackHtml = crMsgFeedbackHtml(msg || { id: msgId, sender });
   if (sender !== 'user') {
-    return `<div class="sender-line"><span class="sender-label ${sender}">${esc(name)}</span>${menuHtml}</div>`;
+    return `<div class="sender-line"><span class="sender-label ${sender}">${esc(name)}</span>${menuHtml}${feedbackHtml}</div>`;
   }
   return menuHtml ? `<div class="sender-line user-line">${menuHtml}</div>` : '';
 }
@@ -929,7 +1223,7 @@ function crEnsureMsgMenu(row, sender, msgId) {
   const content = row.querySelector('.msg-content');
   if (!content || content.querySelector('.msg-menu-wrap')) return;
   const name = crName(sender);
-  const senderLine = crMsgSenderLineHtml(sender, name, msgId);
+  const senderLine = crMsgSenderLineHtml(sender, name, msgId, { id: msgId, sender });
   if (!senderLine) return;
   const directLabel = Array.from(content.children).find(el => el.classList?.contains('sender-label'));
   if (directLabel) {
@@ -960,7 +1254,9 @@ function msgHTML(m) {
   // 系统事件消息（点歌、闹钟等）
   if (sender === 'system') {
     const msgId = m.id || '';
-    return `<div class="system-event-msg" data-msg-id="${msgId}">
+    const afterMsgId = crSystemNoticeAfterMsgId(m);
+    const afterAttr = afterMsgId ? ` data-after-msg-id="${esc(afterMsgId)}"` : '';
+    return `<div class="system-event-msg" data-msg-id="${msgId}"${afterAttr}>
       <span class="system-event-text">${esc(m.content || '')}</span>
       ${crMsgMenuHtml('system', msgId)}
     </div>`;
@@ -1007,7 +1303,7 @@ function msgHTML(m) {
       </div>
     </div>` : '';
 
-  const senderLine = crMsgSenderLineHtml(sender, name, msgId);
+  const senderLine = crMsgSenderLineHtml(sender, name, msgId, m);
 
   const ttsBtn = !isUser && msgId ? `<button class="tts-replay-btn" onclick="crReplayTTS('${msgId}')" title="重听语音">🔊</button>` : '';
 
@@ -1027,6 +1323,71 @@ function msgHTML(m) {
       </div>
       <div class="message-meta">${time}</div>
     </div>`;
+}
+
+let crMsgFeedbackPopover = null;
+
+function closeCrMsgFeedbackPopover() {
+  if (crMsgFeedbackPopover) {
+    crMsgFeedbackPopover.remove();
+    crMsgFeedbackPopover = null;
+  }
+}
+
+function openCrMsgFeedback(ev, msgId, rating) {
+  ev?.stopPropagation?.();
+  closeMsgMenus();
+  closeCrMsgFeedbackPopover();
+  const msg = crMessagesById[msgId] || {};
+  const label = rating === 'like' ? '喜欢的原因' : '不喜欢的原因';
+  const existing = msg.ai_feedback_rating === rating ? (msg.ai_feedback_reason || '') : '';
+  const pop = document.createElement('div');
+  pop.className = 'msg-feedback-popover';
+  pop.innerHTML = `
+    <div class="msg-feedback-title">${label}</div>
+    <textarea id="crMsgFeedbackReason" rows="3" maxlength="600" placeholder="写一点具体原因，之后复盘会用到">${esc(existing)}</textarea>
+    <div class="msg-feedback-footer">
+      <button type="button" class="msg-feedback-cancel" onclick="closeCrMsgFeedbackPopover()">取消</button>
+      <button type="button" class="msg-feedback-submit" onclick="submitCrMsgFeedback('${msgId}','${rating}')">确认</button>
+    </div>`;
+  document.body.appendChild(pop);
+  crMsgFeedbackPopover = pop;
+
+  const rect = ev?.currentTarget?.getBoundingClientRect?.();
+  const pad = 8;
+  if (rect) {
+    const width = pop.offsetWidth || 260;
+    const height = pop.offsetHeight || 160;
+    let left = Math.min(Math.max(pad, rect.left), window.innerWidth - width - pad);
+    let top = rect.bottom + 6;
+    if (top + height > window.innerHeight - pad) top = Math.max(pad, rect.top - height - 6);
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  }
+  setTimeout(() => pop.querySelector('textarea')?.focus(), 0);
+}
+
+async function submitCrMsgFeedback(msgId, rating) {
+  const reason = document.getElementById('crMsgFeedbackReason')?.value.trim() || '';
+  if (!reason) {
+    toast('先写一点原因');
+    return;
+  }
+  try {
+    const res = await api(`/messages/${encodeURIComponent(msgId)}/feedback`, {
+      method: 'PATCH',
+      body: JSON.stringify({ rating, reason }),
+    });
+    if (res.detail || res.error) {
+      toast(res.detail || res.error || '反馈保存失败');
+      return;
+    }
+    closeCrMsgFeedbackPopover();
+    toast('反馈已记录');
+  } catch (e) {
+    console.error('反馈保存失败:', e);
+    toast('反馈保存失败');
+  }
 }
 
 /* ── 消息菜单 ── */
@@ -1051,7 +1412,7 @@ function closeMsgMenus() {
 }
 
 function crMsgMenuRowFromTarget(target) {
-  if (!target || target.closest?.('.msg-menu-wrap, button, input, textarea, a')) return null;
+  if (!target || target.closest?.('.msg-menu-wrap, .msg-feedback-popover, button, input, textarea, a')) return null;
   return target.closest?.('.message-row[data-msg-id], .system-event-msg[data-msg-id]');
 }
 
@@ -1245,11 +1606,13 @@ async function regenerateChatroomMsg(msgId) {
 }
 
 // 点击空白处关闭下拉菜单
-document.addEventListener('click', () => {
+document.addEventListener('click', (e) => {
   if (crMsgLongPressOpened) {
     crMsgLongPressOpened = false;
     return;
   }
+  if (crMsgFeedbackPopover && e.target?.closest?.('.msg-feedback-popover, .msg-feedback-btn')) return;
+  closeCrMsgFeedbackPopover();
   document.querySelectorAll('.msg-menu-dropdown.show').forEach(d => d.classList.remove('show'));
 });
 
@@ -1266,6 +1629,7 @@ function appendMessage(m) {
   div.innerHTML = msgHTML(m);
   const row = div.firstElementChild;
   messagesEl.appendChild(row);
+  if (crIsAiSender(m?.sender)) crMovePrecedingRelatedSystemNoticesAfter(row, m.id || '');
   if (m?.id && crMemoryRecordMsgIds.has(m.id)) crApplyMemoryHint(m.id);
   scrollToBottom(m.sender === 'user');
   return row;
@@ -1373,6 +1737,7 @@ function endStreamingBubble(messageOrAttachments) {
     const renderedRow = div.firstElementChild;
     if (renderedRow) {
       streamRow.replaceWith(renderedRow);
+      if (crIsAiSender(finalMsg.sender)) crMovePrecedingRelatedSystemNoticesAfter(renderedRow, finalMsg.id || '');
       if (crMemoryRecordMsgIds.has(finalMsg.id)) crApplyMemoryHint(finalMsg.id);
       crShowToyCapsule(finalMsg.id, crToyCommandsFromAttachments(finalMsg.attachments));
     }
@@ -1588,6 +1953,9 @@ function handleSSE(data) {
     case 'memory_record':
       crShowMemoryRecordHint(data.msg_id, data.content);
       break;
+    case 'debug':
+      crHandleDebug(data);
+      break;
     case 'music':
       if (data.msg_id && data.cards) {
         crMusicCards[data.msg_id] = data.cards;
@@ -1735,40 +2103,514 @@ function closeSettings() {
   document.getElementById('settingsOverlay').classList.remove('active');
 }
 
-// ── 人设面板 ──
+// ── 人设页面 ──
+const CR_PERSONA_SECTIONS = [
+  { key: 'identity_core', label: '核心身份', lock: 'locked', wide: true },
+  { key: 'relationship_core', label: '关系锚点', lock: 'adaptive', wide: true },
+  { key: 'personality_core', label: '人格与判断', lock: 'adaptive', wide: true },
+  { key: 'communication_style', label: '表达与互动方式', lock: 'adaptive', wide: true },
+  { key: 'boundaries_and_forbidden', label: '边界与禁忌', lock: 'adaptive', wide: true },
+  { key: 'relationship_protocol', label: '协议边界', lock: 'adaptive', wide: true },
+  { key: 'tool_and_capability_rules', label: '能力与工具规则', lock: 'guarded' },
+  { key: 'prompt_hygiene_rules', label: '提示边界', lock: 'guarded' },
+  { key: 'evolution_notes', label: '用户信息', lock: 'guarded' },
+];
+const CR_PERSONA_LOCK_LABELS = {
+  locked: '锁定',
+  guarded: '审慎',
+  adaptive: '可进化',
+  temporary: '临时',
+};
+let crPersonaRendered = false;
+let crPersonaEvolutionRuns = [];
+let crPersonaSelectedRunIndex = -1;
+let crPersonaEvolutionSaving = false;
+let crPersonaResizeBound = false;
+
+function crPersonaFieldId(key) {
+  return `personaSection_${key}`;
+}
+
+function crCompactJoin(parts) {
+  return parts.map(part => (part || '').trim()).filter(Boolean).join('\n\n');
+}
+
+function crEstimatePersonaRows(text) {
+  const lines = String(text || '').split('\n');
+  return lines.reduce((count, line) => count + Math.max(1, Math.ceil(line.length / 56)), 0);
+}
+
+function crResizePersonaTextarea(el) {
+  if (!el) return;
+  const style = window.getComputedStyle(el);
+  const lineHeight = parseFloat(style.lineHeight) || 19;
+  const verticalPadding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0) + 2;
+  const estimatedRows = crEstimatePersonaRows(el.value);
+  const charCount = [...String(el.value || '')].length;
+  const minRows = (charCount > 220 || estimatedRows > 12)
+    ? 14
+    : (charCount > 60 || estimatedRows > 5)
+      ? 10
+      : (charCount > 0 ? 5 : 4);
+  const minHeight = Math.round((lineHeight * minRows) + verticalPadding);
+  const maxHeight = Math.max(220, Math.min(window.innerHeight * 0.56, 560));
+  el.style.height = 'auto';
+  const nextHeight = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
+  el.style.height = `${nextHeight}px`;
+  el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
+}
+
+function crResizePersonaTextareas(root = document) {
+  root.querySelectorAll?.('.persona-page-body textarea').forEach(crResizePersonaTextarea);
+}
+
+function crPersonaSectionForHeading(heading) {
+  const text = String(heading || '').toLowerCase();
+  const bare = text.replace(/^#{1,6}\s*/, '').replace(/^\*\*/, '').replace(/\*\*$/, '').trim();
+  const userName = String(crUserName || '').trim().toLowerCase();
+  if (
+    text.includes('用户信息') ||
+    text.includes('用户资料') ||
+    text.includes('用户档案') ||
+    text.includes('用户设定') ||
+    text.includes('user info') ||
+    text.includes('user profile') ||
+    (userName && (bare === userName || (bare.includes(userName) && (
+      bare.includes('信息') ||
+      bare.includes('资料') ||
+      bare.includes('档案') ||
+      bare.includes('设定') ||
+      bare.includes('profile')
+    ))))
+  ) return 'evolution_notes';
+  if (text.includes('协议') || text.includes('protocol')) return 'relationship_protocol';
+  if (text.includes('prompt') || text.includes('system') || text.includes('叙事') || text.includes('安全')) return 'prompt_hygiene_rules';
+  if (text.includes('能力') || text.includes('工具') || text.includes('tool')) return 'tool_and_capability_rules';
+  if (text.includes('边界') || text.includes('禁止') || text.includes('forbidden') || text.includes('boundary')) return 'boundaries_and_forbidden';
+  if (text.includes('说话') || text.includes('表达') || text.includes('互动') || text.includes('情绪') || text.includes('提醒') || text.includes('communication')) return 'communication_style';
+  if (text.includes('人格') || text.includes('性格') || text.includes('判断') || text.includes('personality')) return 'personality_core';
+  if (text.includes('关系') || text.includes('锚点') || text.includes('relationship')) return 'relationship_core';
+  if (text.includes('身份') || text.includes('identity')) return 'identity_core';
+  return 'evolution_notes';
+}
+
+function crMigratePersonaSections(text) {
+  const clean = (text || '').replace(/\r\n/g, '\n').trim();
+  const result = {};
+  if (!clean) return result;
+  const headingRe = /^(#{1,6}\s+.+|\*\*[^*\n]+\*\*)\s*$/gm;
+  const matches = [...clean.matchAll(headingRe)];
+  if (!matches.length) {
+    result.identity_core = clean;
+    return result;
+  }
+  const intro = clean.slice(0, matches[0].index).trim();
+  if (intro) result.identity_core = intro;
+  matches.forEach((match, index) => {
+    const bodyStart = match.index + match[0].length;
+    const bodyEnd = index + 1 < matches.length ? matches[index + 1].index : clean.length;
+    const body = clean.slice(bodyStart, bodyEnd).trim();
+    if (!body) return;
+    const key = crPersonaSectionForHeading(match[1]);
+    const block = `${match[1].trim()}\n${body}`.trim();
+    result[key] = result[key] ? `${result[key]}\n\n${block}` : block;
+  });
+  return result;
+}
+
+function crNormalizePersonaSections(cfg) {
+  const stored = cfg?.connor_persona_sections || {};
+  if (!stored || !Object.keys(stored).length) return crMigratePersonaSections(cfg?.connor_persona || '');
+  return {
+    identity_core: stored.identity_core || '',
+    relationship_core: stored.relationship_core || '',
+    personality_core: crCompactJoin([stored.personality_core, stored.personality_traits]),
+    communication_style: crCompactJoin([
+      stored.communication_style,
+      stored.speech_style,
+      stored.interaction_rules,
+      stored.emotional_modes,
+      stored.care_and_reminders,
+    ]),
+    boundaries_and_forbidden: stored.boundaries_and_forbidden || '',
+    relationship_protocol: stored.relationship_protocol || '',
+    tool_and_capability_rules: stored.tool_and_capability_rules || '',
+    prompt_hygiene_rules: crCompactJoin([stored.prompt_hygiene_rules, stored.security_narrative_rules]),
+    evolution_notes: stored.evolution_notes || '',
+  };
+}
+
+function crRenderPersonaSections() {
+  const container = document.getElementById('personaSections');
+  if (!container || crPersonaRendered) return;
+  container.innerHTML = CR_PERSONA_SECTIONS.map(section => `
+    <details class="persona-section ${section.wide ? 'wide' : ''}">
+      <summary>
+        <span class="persona-section-title">${section.label}</span>
+        <span class="persona-lock ${section.lock}">${CR_PERSONA_LOCK_LABELS[section.lock] || section.lock}</span>
+      </summary>
+      <textarea id="${crPersonaFieldId(section.key)}" spellcheck="false"></textarea>
+    </details>
+  `).join('');
+  container.querySelectorAll('.persona-section').forEach(sectionEl => {
+    sectionEl.addEventListener('toggle', () => crResizePersonaTextareas(sectionEl));
+  });
+  container.querySelectorAll('textarea').forEach(textarea => {
+    textarea.addEventListener('input', () => crResizePersonaTextarea(textarea));
+  });
+  document.getElementById('personaExtraText')?.addEventListener('input', event => crResizePersonaTextarea(event.currentTarget));
+  if (!crPersonaResizeBound) {
+    window.addEventListener('resize', () => {
+      if (document.getElementById('personaOverlay')?.classList.contains('active')) {
+        crResizePersonaTextareas(document.getElementById('personaOverlay'));
+      }
+    });
+    crPersonaResizeBound = true;
+  }
+  document.getElementById('personaConnorName')?.addEventListener('input', crSyncPersonaNameLabels);
+  document.getElementById('personaEvolutionEnabled')?.addEventListener('change', crSavePersonaEvolutionToggle);
+  crPersonaRendered = true;
+}
+
+function crFillPersonaSections(values = {}) {
+  CR_PERSONA_SECTIONS.forEach(section => {
+    const el = document.getElementById(crPersonaFieldId(section.key));
+    if (el) {
+      el.value = values?.[section.key] || '';
+      crResizePersonaTextarea(el);
+    }
+  });
+  crResizePersonaTextarea(document.getElementById('personaExtraText'));
+}
+
+function crCollectPersonaSections() {
+  return CR_PERSONA_SECTIONS.reduce((acc, section) => {
+    acc[section.key] = (document.getElementById(crPersonaFieldId(section.key))?.value || '').trim();
+    return acc;
+  }, {});
+}
+
+function crCompilePersonaSections() {
+  return CR_PERSONA_SECTIONS.map(section => {
+    const value = (document.getElementById(crPersonaFieldId(section.key))?.value || '').trim();
+    return value ? `[${section.label}]\n${value}` : '';
+  }).filter(Boolean).join('\n\n');
+}
+
+function crCurrentPersonaName() {
+  return (document.getElementById('personaConnorName')?.value || '').trim() || crConnorName || '第二AI';
+}
+
+function crSyncPersonaNameLabels() {
+  const name = crCurrentPersonaName();
+  const title = document.getElementById('personaPageTitle');
+  if (title) title.textContent = `🎭 ${name} 人设`;
+  const evoTitle = document.getElementById('personaEvolutionTitle');
+  if (evoTitle) evoTitle.textContent = `${name} 自动复盘`;
+  const historyTitle = document.getElementById('personaEvolutionHistoryTitle');
+  if (historyTitle) historyTitle.textContent = `${name} 自动复盘记录`;
+}
+
+function crBeijingDateInfo(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour || 0) };
+}
+
+function crAddDaysToBeijingDate(dateText, days) {
+  const base = new Date(`${dateText}T00:00:00+08:00`);
+  base.setUTCDate(base.getUTCDate() + days);
+  return crBeijingDateInfo(base).date;
+}
+
+function crCurrentReviewDateString() {
+  const now = crBeijingDateInfo();
+  return now.hour < 5 ? crAddDaysToBeijingDate(now.date, -1) : now.date;
+}
+
+function crSetupPersonaEvolutionDate() {
+  const input = document.getElementById('personaEvolutionDate');
+  if (!input) return;
+  const current = crCurrentReviewDateString();
+  input.max = current;
+  if (!input.value) input.value = current;
+}
+
+async function crPersonaEvolutionApi(path, opts = {}) {
+  const resp = await fetch(`/api/persona-evolution/connor${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || data?.ok === false || data?.detail) {
+    throw new Error(data.message || data.detail || '请求失败');
+  }
+  return data;
+}
+
+function crEvolutionStatusLabel(status) {
+  return {
+    applied: '已自动改写',
+    draft: '待确认',
+    reviewed: '已复盘',
+    skipped: '已跳过',
+    failed: '失败',
+    duplicate: '已执行',
+  }[status] || status || '未知';
+}
+
+function crFormatRunTime(ts) {
+  if (!ts) return '';
+  try {
+    return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
+  } catch {
+    return '';
+  }
+}
+
+function crEvolutionDiffsOf(entry) {
+  if (Array.isArray(entry?.diffs) && entry.diffs.length) return entry.diffs;
+  if (Array.isArray(entry?.patches)) return entry.patches;
+  return [];
+}
+
+function crNormalizeEvolutionAction(diff, run = {}) {
+  const action = diff?.action || '';
+  if (['added', 'modified', 'cleared'].includes(action)) return action;
+  const key = diff?.section || diff?.target || '';
+  const before = (run?.before_sections?.[key] || diff?.before_preview || '').trim();
+  const after = (run?.after_sections?.[key] || diff?.after_preview || '').trim();
+  if (!before && after) return 'added';
+  if (before && !after) return 'cleared';
+  return 'modified';
+}
+
+function crCompactEvolutionText(text, limit = 140) {
+  const clean = (text || '').replace(/\s+/g, ' ').trim();
+  return clean.length > limit ? `${clean.slice(0, limit)}...` : clean;
+}
+
+function crRenderEvolutionDiffs(diffs = [], run = {}) {
+  if (!diffs.length) return '';
+  const groups = [
+    { key: 'added', title: '新增了什么' },
+    { key: 'modified', title: '修改了什么' },
+    { key: 'cleared', title: '删除了什么' },
+  ];
+  return groups.map(group => {
+    const items = diffs.filter(diff => crNormalizeEvolutionAction(diff, run) === group.key);
+    if (!items.length) return '';
+    return `<div class="persona-evolution-change-group">
+      <div class="persona-evolution-change-title">${group.title}</div>
+      ${items.map(diff => `<div class="persona-evolution-change"><b>${esc(diff.label || diff.section || '未命名部分')}</b>${diff.reason ? `：${esc(crCompactEvolutionText(diff.reason))}` : ''}</div>`).join('')}
+    </div>`;
+  }).filter(Boolean).join('');
+}
+
+function crRenderPersonaEvolutionLatest(entry) {
+  const el = document.getElementById('personaEvolutionLatest');
+  if (!el) return;
+  if (!entry) {
+    el.textContent = '最近复盘：暂无记录';
+    return;
+  }
+  const diffs = crEvolutionDiffsOf(entry);
+  const changed = diffs.length ? ` · 已改 ${diffs.length} 个部分` : '';
+  const when = entry.window_label || crFormatRunTime(entry.created_at);
+  const timeText = when ? ` · ${when}` : '';
+  el.textContent = `最近复盘：${crEvolutionStatusLabel(entry.status)} · 点评 ${entry.feedback_count || 0} 条${changed}${timeText}`;
+}
+
+function crRenderPersonaEvolutionRuns() {
+  const el = document.getElementById('personaEvolutionRuns');
+  if (!el) return;
+  const runs = crPersonaEvolutionRuns;
+  if (!runs.length) {
+    el.innerHTML = `<div class="persona-history-empty">近 72 小时暂无复盘记录</div>`;
+    return;
+  }
+  if (crPersonaSelectedRunIndex >= runs.length) crPersonaSelectedRunIndex = -1;
+  const selected = crPersonaSelectedRunIndex >= 0 ? runs[crPersonaSelectedRunIndex] : null;
+  const rows = runs.map((run, index) => {
+    const diffs = crEvolutionDiffsOf(run);
+    const active = index === crPersonaSelectedRunIndex;
+    return `<div class="persona-history-row">
+      <button class="persona-history-tab ${active ? 'active' : ''}" type="button" onclick="crSelectPersonaEvolutionRun(${index})">
+        <span>${esc(run.window_label || crFormatRunTime(run.created_at))}</span>
+        <span class="persona-history-status">${active ? '收起' : '查看'} · ${esc(crEvolutionStatusLabel(run.status))} · ${run.feedback_count || 0} 条${diffs.length ? ` · 改 ${diffs.length}` : ''}</span>
+      </button>
+      <button class="persona-history-delete" type="button" title="删除记录" onclick="crDeletePersonaEvolutionRun(event, ${index})">删</button>
+    </div>`;
+  }).join('');
+  const detail = selected
+    ? `<div class="persona-history-detail">${[
+        selected.summary ? `<div class="persona-history-note">${esc(selected.summary)}</div>` : '',
+        selected.user_message ? `<div class="persona-history-note">${esc(selected.user_message)}</div>` : '',
+        selected.error ? `<div class="persona-history-note">${esc(selected.error)}</div>` : '',
+        crRenderEvolutionDiffs(crEvolutionDiffsOf(selected), selected),
+      ].filter(Boolean).join('') || '<div class="persona-history-note">本轮没有可显示的详细内容。</div>'}</div>`
+    : `<div class="persona-history-note">选择一条记录查看详情。</div>`;
+  el.innerHTML = rows + detail;
+}
+
+async function crLoadPersonaEvolutionRuns() {
+  try {
+    const data = await crPersonaEvolutionApi('/runs?limit=50');
+    crPersonaEvolutionRuns = data.runs || [];
+    crRenderPersonaEvolutionLatest(crPersonaEvolutionRuns[0] || null);
+    crRenderPersonaEvolutionRuns();
+  } catch (e) {
+    console.warn('加载人设复盘记录失败', e);
+  }
+}
+
+function crSelectPersonaEvolutionRun(index) {
+  crPersonaSelectedRunIndex = crPersonaSelectedRunIndex === index ? -1 : index;
+  crRenderPersonaEvolutionRuns();
+}
+
+async function crDeletePersonaEvolutionRun(event, index) {
+  event.stopPropagation();
+  const run = crPersonaEvolutionRuns[index];
+  if (!run?.id) return;
+  if (!confirm('删除这条复盘记录？')) return;
+  try {
+    await crPersonaEvolutionApi(`/runs/${encodeURIComponent(run.id)}`, { method: 'DELETE' });
+    crPersonaSelectedRunIndex = -1;
+    toast('记录已删除');
+    await crLoadPersonaEvolutionRuns();
+  } catch (e) {
+    console.error(e);
+    toast('删除失败');
+  }
+}
+
+async function crSavePersonaEvolutionToggle() {
+  if (crPersonaEvolutionSaving) return;
+  const input = document.getElementById('personaEvolutionEnabled');
+  if (!input) return;
+  const enabled = !!input.checked;
+  crPersonaEvolutionSaving = true;
+  input.disabled = true;
+  try {
+    await crPersonaEvolutionApi('/config', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    });
+    toast(enabled ? '每日复盘已开启' : '每日复盘已关闭');
+  } catch (e) {
+    input.checked = !enabled;
+    console.error(e);
+    toast(e.message || '开关保存失败');
+  } finally {
+    input.disabled = false;
+    crPersonaEvolutionSaving = false;
+  }
+}
+
+async function crRunPersonaEvolutionTest() {
+  const btn = document.getElementById('personaEvolutionTestBtn');
+  const date = document.getElementById('personaEvolutionDate')?.value || crCurrentReviewDateString();
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '复盘中';
+  try {
+    await crSavePersona({ keepOpen: true, silent: true });
+    const result = await crPersonaEvolutionApi('/run-test', {
+      method: 'POST',
+      body: JSON.stringify({ date }),
+    });
+    crPersonaSelectedRunIndex = -1;
+    crRenderPersonaEvolutionLatest(result);
+    await crLoadPersonaEvolutionRuns();
+    const cfg = await api('/config');
+    crFillPersonaSections(crNormalizePersonaSections(cfg));
+    toast(result?.ok === false ? '复盘失败' : '复盘已完成');
+  } catch (e) {
+    console.error(e);
+    crRenderPersonaEvolutionLatest({ status: 'failed', message: '测试复盘失败', error: e.message || String(e) });
+    toast('复盘失败');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '立即复盘';
+  }
+}
+
+async function crOpenPersonaEvolutionHistory() {
+  crPersonaSelectedRunIndex = -1;
+  crSyncPersonaNameLabels();
+  await crLoadPersonaEvolutionRuns();
+  const modal = document.getElementById('personaEvolutionModal');
+  modal?.classList.add('show');
+  modal?.setAttribute('aria-hidden', 'false');
+}
+
+function crClosePersonaEvolutionHistory() {
+  const modal = document.getElementById('personaEvolutionModal');
+  modal?.classList.remove('show');
+  modal?.setAttribute('aria-hidden', 'true');
+}
+
+function crOnPersonaEvolutionBackdrop(event) {
+  if (event.target?.id === 'personaEvolutionModal') crClosePersonaEvolutionHistory();
+}
+
 async function crOpenPersona() {
+  crRenderPersonaSections();
+  crSetupPersonaEvolutionDate();
   document.getElementById('personaOverlay').classList.add('active');
   closeSidebar();
   try {
     const cfg = await api('/config');
-    document.getElementById('personaConnorName').value = cfg.connor_name || 'Connor';
-    document.getElementById('personaConnorText').value = cfg.connor_persona || '';
+    applyChatroomNames(cfg);
+    document.getElementById('personaConnorName').value = cfg.connor_name || '第二AI';
     document.getElementById('personaExtraEnabled').checked = !!cfg.connor_persona_extra_enabled;
     document.getElementById('personaExtraText').value = cfg.connor_persona_extra || '';
-  } catch(e) { console.error(e); }
+    document.getElementById('personaEvolutionEnabled').checked = !!cfg.connor_persona_evolution_enabled;
+    crFillPersonaSections(crNormalizePersonaSections(cfg));
+    crSyncPersonaNameLabels();
+    await crLoadPersonaEvolutionRuns();
+  } catch(e) {
+    console.error(e);
+    toast('人设加载失败');
+  }
 }
 
 function crClosePersona() {
   document.getElementById('personaOverlay').classList.remove('active');
+  crClosePersonaEvolutionHistory();
 }
 
-async function crSavePersona() {
+async function crSavePersona(options = {}) {
   const name = document.getElementById('personaConnorName').value.trim();
-  const persona = document.getElementById('personaConnorText').value;
   const extraEnabled = document.getElementById('personaExtraEnabled').checked;
   const extra = document.getElementById('personaExtraText').value;
+  const sections = crCollectPersonaSections();
+  const persona = crCompilePersonaSections();
   await api('/config', {
     method: 'PUT',
     body: JSON.stringify({
       connor_name: name || undefined,
       connor_persona: persona,
+      connor_persona_sections: sections,
+      connor_persona_evolution_enabled: !!document.getElementById('personaEvolutionEnabled').checked,
       connor_persona_extra_enabled: extraEnabled,
       connor_persona_extra: extra,
     }),
   });
   if (name) applyChatroomNames({ connor_name: name });
-  crClosePersona();
-  toast('人设已保存');
+  crSyncPersonaNameLabels();
+  if (!options.keepOpen) crClosePersona();
+  if (!options.silent) toast('人设已保存');
 }
 
 async function saveSettings() {
@@ -1799,7 +2641,6 @@ async function saveSettings() {
     }),
   });
   await loadMessages();
-  checkConnor();
 
   // 同步本地变量
   crTtsAionVoice = document.getElementById('setTtsAionVoice').value;
@@ -1832,6 +2673,7 @@ function openMemory() {
   document.getElementById('memoryOverlay').classList.add('active');
   hideMemForm();
   loadMemories();
+  loadChatroomCompressionDraft();
   closeSidebar();
 }
 
@@ -1839,12 +2681,216 @@ function closeMemory() {
   document.getElementById('memoryOverlay').classList.remove('active');
 }
 
+async function memoryCompressionApi(method, url, body = null) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const resp = await fetch(url, opts);
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail || data.message || '请求失败');
+  return data;
+}
+
+async function loadChatroomCompressionDraft() {
+  try {
+    const result = await memoryCompressionApi('GET', '/api/memories/compress-daily/latest?target=chatroom');
+    chatroomDailyCompressReview = result.review || null;
+    renderChatroomCompressionReview();
+  } catch {
+    chatroomDailyCompressReview = null;
+  }
+}
+
+function flattenChatroomDraft(field) {
+  return ((chatroomDailyCompressReview?.payload?.chatroom?.batches) || []).flatMap(batch => batch[field] || []);
+}
+
+function chatroomDraftOldRows() {
+  return chatroomDailyCompressReview?.counts?.chatroom?.old_rows || [];
+}
+
+function chatroomDraftTime(ts) {
+  if (!ts) return '';
+  const d = new Date(Number(ts) * 1000);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function chatroomDraftKeywords(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return String(value).split(/[,，、\n]/).map(s => s.trim()).filter(Boolean);
+  }
+}
+
+function renderChatroomCompressItem(item, kindLabel) {
+  const kws = chatroomDraftKeywords(item.keywords);
+  const sourceCount = (item.source_memory_ids || []).length;
+  return `<div class="chatroom-compress-item">
+    <div>${esc(item.content || '')}</div>
+    <div class="chatroom-compress-meta">
+      <span>${esc(kindLabel)}</span>
+      <span>${esc(chatroomDraftTime(item.memory_time || item.source_start_ts))}</span>
+      <span>来源 ${sourceCount} 条日常</span>
+      <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
+      ${kws.length ? `<span>${kws.map(k => esc(k)).join(' · ')}</span>` : ''}
+    </div>
+    ${item.reason ? `<div class="chatroom-compress-meta">${esc(item.reason)}</div>` : ''}
+  </div>`;
+}
+
+function renderChatroomOldCompressItem(item) {
+  return `<div class="chatroom-compress-item">
+    <div>${esc(item.content || '')}</div>
+    <div class="chatroom-compress-meta">
+      <span>${esc(chatroomDraftTime(item.source_start_ts || item.created_at))}</span>
+      <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
+    </div>
+  </div>`;
+}
+
+function renderChatroomCompressionReview() {
+  const el = document.getElementById('chatroomCompressReview');
+  if (!el) return;
+  if (!chatroomDailyCompressReview || !['draft', 'failed'].includes(chatroomDailyCompressReview.status)) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  const counts = chatroomDailyCompressReview.counts || {};
+  const chat = counts.chatroom || {};
+  const dailyItems = flattenChatroomDraft('compressed_daily');
+  const importantItems = flattenChatroomDraft('important_memories');
+  const oldRows = chatroomDraftOldRows();
+  const messages = (chat.messages || []).filter(Boolean);
+  const errors = (chat.errors || []).filter(Boolean);
+  const canApply = chatroomDailyCompressReview.status === 'draft'
+    && (dailyItems.length || importantItems.length || Number(chat.processed || 0));
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div class="chatroom-compress-head">
+      <span>聊天室压缩草稿</span>
+      <span class="chatroom-compress-status">${esc(chatroomDailyCompressReview.status === 'draft' ? '待确认' : '生成失败')}</span>
+    </div>
+    <div class="chatroom-compress-stats">
+      <span>候选 ${Number(chatroomDailyCompressReview.candidate_count || 0)}</span>
+      <span>拟移除 ${Number(chat.processed || 0)}</span>
+      <span>新日常 ${Number(chat.created_daily || 0)}</span>
+      <span>新长期重要 ${Number(chat.created_important || 0)}</span>
+    </div>
+    ${messages.length ? `<div class="chatroom-compress-msg">${esc(messages.join('\n'))}</div>` : ''}
+    ${errors.length ? `<div class="chatroom-compress-msg" style="color:var(--danger);">${esc(errors.join('\n'))}</div>` : ''}
+    <details open>
+      <summary>新日常 ${dailyItems.length}</summary>
+      ${dailyItems.length ? dailyItems.map(item => renderChatroomCompressItem(item, '日常')).join('') : '<div class="mem-empty">没有新日常</div>'}
+    </details>
+    <details ${importantItems.length ? 'open' : ''}>
+      <summary>新长期重要 ${importantItems.length}</summary>
+      ${importantItems.length ? importantItems.map(item => renderChatroomCompressItem(item, '长期重要')).join('') : '<div class="mem-empty">没有新长期重要</div>'}
+    </details>
+    <details>
+      <summary>将移除的旧日常 ${oldRows.length}</summary>
+      ${oldRows.length ? oldRows.slice(0, 120).map(renderChatroomOldCompressItem).join('') : '<div class="mem-empty">没有旧日常会被移除</div>'}
+    </details>
+    <div class="chatroom-compress-actions">
+      <button class="chatroom-compress-discard" onclick="discardChatroomDailyCompressionDraft('${esc(chatroomDailyCompressReview.id)}')">废弃草稿</button>
+      <button class="chatroom-compress-apply" onclick="applyChatroomDailyCompressionDraft('${esc(chatroomDailyCompressReview.id)}')" ${canApply ? '' : 'disabled'}>确认应用</button>
+    </div>`;
+}
+
+function setChatroomCompressionBusy(value) {
+  document.querySelectorAll('.chatroom-compress-actions button').forEach(btn => btn.disabled = value);
+  const btn = document.getElementById('chatroomCompressDailyBtn');
+  if (btn) btn.disabled = value;
+}
+
+async function compressChatroomDailyMemories() {
+  if (!currentRoom) return;
+  if (chatroomDailyCompressReview && chatroomDailyCompressReview.status === 'draft') {
+    renderChatroomCompressionReview();
+    toast('已经有一份聊天室压缩草稿，先确认应用或废弃它');
+    return;
+  }
+  if (!confirm('将为聊天室记忆库中超过 14 天的日常记忆生成压缩草稿；这一步不会修改记忆库。继续？')) return;
+  const btn = document.getElementById('chatroomCompressDailyBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '生成中...';
+  }
+  toast('正在生成聊天室压缩草稿...');
+  try {
+    const result = await memoryCompressionApi('POST', '/api/memories/compress-daily', { target: 'chatroom', days: 14 });
+    chatroomDailyCompressReview = result.review || null;
+    renderChatroomCompressionReview();
+    toast(result.message || '聊天室压缩草稿已生成', 3000);
+  } catch (err) {
+    toast('生成压缩草稿失败: ' + err.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🗜️ 压缩日常';
+    }
+  }
+}
+
+async function applyChatroomDailyCompressionDraft(reviewId) {
+  if (!reviewId) return;
+  const chat = chatroomDailyCompressReview?.counts?.chatroom || {};
+  if (!confirm(`确认应用这份聊天室压缩草稿？将移除旧日常 ${Number(chat.processed || 0)} 条，并写入新日常 ${Number(chat.created_daily || 0)} 条、新长期重要 ${Number(chat.created_important || 0)} 条。`)) return;
+  setChatroomCompressionBusy(true);
+  toast('正在应用聊天室压缩草稿...');
+  try {
+    const result = await memoryCompressionApi('POST', `/api/memories/compress-daily/${reviewId}/apply`);
+    if (!result.ok) throw new Error(result.message || '应用失败');
+    chatroomDailyCompressReview = null;
+    renderChatroomCompressionReview();
+    await loadMemories();
+    setChatroomCompressionBusy(false);
+    toast(result.message || '聊天室压缩草稿已应用', 3000);
+  } catch (err) {
+    toast('应用压缩草稿失败: ' + err.message);
+    setChatroomCompressionBusy(false);
+  }
+}
+
+async function discardChatroomDailyCompressionDraft(reviewId) {
+  if (!reviewId) return;
+  if (!confirm('确定废弃这份聊天室压缩草稿？')) return;
+  setChatroomCompressionBusy(true);
+  try {
+    const result = await memoryCompressionApi('POST', `/api/memories/compress-daily/${reviewId}/discard`);
+    if (!result.ok) throw new Error(result.message || '废弃失败');
+    chatroomDailyCompressReview = null;
+    renderChatroomCompressionReview();
+    setChatroomCompressionBusy(false);
+    toast(result.message || '聊天室压缩草稿已废弃');
+  } catch (err) {
+    toast('废弃压缩草稿失败: ' + err.message);
+    setChatroomCompressionBusy(false);
+  }
+}
+
 // 点击遮罩关闭记忆库
 document.getElementById('memoryOverlay').addEventListener('click', (e) => {
   if (e.target.id === 'memoryOverlay') closeMemory();
 });
 
-async function loadMemories() {
+function restoreChatroomMemoryPosition(memId) {
+  if (!memId) return;
+  requestAnimationFrame(() => {
+    const list = document.getElementById('memList');
+    const item = list ? Array.from(list.querySelectorAll('.mem-item')).find(el => el.dataset.id === memId) : null;
+    if (!item) return;
+    item.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+    item.classList.add('mem-return-focus');
+    setTimeout(() => item.classList.remove('mem-return-focus'), 1200);
+  });
+}
+
+async function loadMemories(focusMemId = '') {
   if (!currentRoom) return;
   const memListEl = document.getElementById('memList');
   try {
@@ -1859,9 +2905,14 @@ async function loadMemories() {
       const date = new Date(m.created_at * 1000).toLocaleDateString();
       const kw = m.keywords ? `关键词: ${esc(m.keywords)}` : '';
       const hasSource = Number(m.source_count || 0) > 0;
+      const kindLabel = m.memory_kind_label || (m.memory_kind === 'daily' ? '日常' : '长期重要');
+      const kindClass = m.memory_kind === 'daily' ? 'daily' : 'long-term';
       return `
         <div class="mem-item" data-id="${m.id}">
-          <div class="mem-content">${esc(m.content)}</div>
+          <div class="mem-head">
+            <span class="mem-kind ${kindClass}">${esc(kindLabel)}</span>
+            <div class="mem-content">${esc(m.content)}</div>
+          </div>
           <div class="mem-meta">
             <span>${date}</span>
             <span>重要度: ${m.importance}</span>
@@ -1874,6 +2925,7 @@ async function loadMemories() {
           </div>
         </div>`;
     }).join('');
+    restoreChatroomMemoryPosition(focusMemId);
   } catch (err) {
     memListEl.innerHTML = `<div class="mem-empty">加载失败: ${err.message}</div>`;
   }
@@ -1884,6 +2936,8 @@ function showAddMemory() {
   document.getElementById('memContent').value = '';
   document.getElementById('memKeywords').value = '';
   document.getElementById('memImportance').value = '0.5';
+  const kindEl = document.getElementById('memKind');
+  if (kindEl) kindEl.value = 'long_term';
   document.getElementById('memForm').style.display = 'block';
   document.getElementById('memContent').focus();
 }
@@ -1901,6 +2955,8 @@ async function editMemory(memId) {
   document.getElementById('memContent').value = mem.content || '';
   document.getElementById('memKeywords').value = mem.keywords || '';
   document.getElementById('memImportance').value = mem.importance ?? 0.5;
+  const kindEl = document.getElementById('memKind');
+  if (kindEl) kindEl.value = mem.memory_kind === 'daily' ? 'daily' : 'long_term';
   document.getElementById('memForm').style.display = 'block';
   document.getElementById('memContent').focus();
 }
@@ -1915,6 +2971,7 @@ async function saveMemory() {
     content,
     keywords: document.getElementById('memKeywords').value.trim(),
     importance: parseFloat(document.getElementById('memImportance').value) || 0.5,
+    memory_kind: document.getElementById('memKind')?.value === 'daily' ? 'daily' : 'long_term',
   };
 
   try {
@@ -1930,7 +2987,7 @@ async function saveMemory() {
     }
     toast(editId ? '记忆已更新' : '记忆已添加');
     hideMemForm();
-    loadMemories();
+    loadMemories(editId || result?.id || '');
   } catch (err) {
     toast('保存失败: ' + err.message);
   }
@@ -2075,18 +3132,6 @@ document.getElementById('settingsOverlay').addEventListener('click', (e) => {
 //  Connor 状态
 // ══════════════════════════════════════════════════
 
-async function checkConnor() {
-  try {
-    const result = await api('/connor-status');
-    const online = result.online;
-    connorDot.className = `connor-dot ${online ? 'online' : ''}`;
-    connorStatusEl.textContent = `${crConnorName}: ${online ? '在线' : '离线'}`;
-  } catch {
-    connorDot.className = 'connor-dot';
-    connorStatusEl.textContent = `${crConnorName}: 离线`;
-  }
-}
-
 // ══════════════════════════════════════════════════
 //  侧栏
 // ══════════════════════════════════════════════════
@@ -2147,6 +3192,10 @@ function connectWS() {
 
       if (data.type === 'memory_record' && data.data && !isSending && !isAiChatting) {
         crShowMemoryRecordHint(data.data.msg_id, data.data.content);
+      }
+
+      if (data.type === 'debug' && data.data) {
+        crHandleDebug(data);
       }
 
       if (data.type === 'chatroom_msg_created' && currentRoom) {
@@ -2222,13 +3271,80 @@ function connectWS() {
 //  图片上传 & 预览 & 查看器
 // ══════════════════════════════════════════════════
 
+function crLuckinOrderStatusHtml(data) {
+  const code = data && data.take_meal_code ? String(data.take_meal_code) : "";
+  const takeOrderId = data && data.take_order_id ? String(data.take_order_id) : "";
+  const status = data && data.order_status_name
+    ? String(data.order_status_name)
+    : (data && data.order_status !== undefined && data.order_status !== null ? `状态 ${data.order_status}` : "");
+  const time = data && (data.take_meal_time || data.about_time) ? String(data.take_meal_time || data.about_time) : "";
+  if (code) {
+    const orderLine = takeOrderId ? `<div style="font-size:11px;color:rgba(255,255,255,.58);margin-top:3px">取餐序号：${esc(takeOrderId)}</div>` : "";
+    const statusLine = status ? `<div style="font-size:11px;color:rgba(255,255,255,.58);margin-top:3px">${esc(status)}</div>` : "";
+    return `<div style="font-size:13px;color:#fff;margin-top:8px">取餐码：<b style="font-size:18px;letter-spacing:.5px">${esc(code)}</b></div>${orderLine}${statusLine}`;
+  }
+  const main = status ? `当前状态：${status}` : "暂时还没有取餐码";
+  const hint = time ? `预计：${time}` : "支付后稍等再查一次";
+  return `<div style="font-size:12px;color:rgba(255,255,255,.72);margin-top:8px;line-height:1.35">${esc(main)}</div><div style="font-size:11px;color:rgba(255,255,255,.52);margin-top:3px">${esc(hint)}</div>`;
+}
+
+async function crQueryLuckinOrderStatus(btn) {
+  const orderId = btn?.dataset?.orderId || "";
+  const card = btn?.closest('.luckin-pay-card');
+  const statusEl = card?.querySelector('.luckin-order-status');
+  if (!orderId || !statusEl) return;
+  const oldText = btn.textContent || "查询取餐码";
+  btn.disabled = true;
+  btn.textContent = "查询中...";
+  statusEl.innerHTML = '<div style="font-size:12px;color:rgba(255,255,255,.72);margin-top:8px">正在查询订单状态...</div>';
+  try {
+    const res = await fetch(`${API}/luckin/order/${encodeURIComponent(orderId)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.detail || data.error || "查询失败");
+    statusEl.innerHTML = crLuckinOrderStatusHtml(data);
+  } catch (err) {
+    statusEl.innerHTML = `<div style="font-size:12px;color:#ffd1d1;margin-top:8px;line-height:1.35">${esc(err.message || "查询失败")}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+
+function buildLuckinPaymentCard(item) {
+  const title = esc(item.title || "瑞幸咖啡订单");
+  const shop = item.shop ? `<div style="font-size:12px;color:rgba(255,255,255,.72);margin-top:2px">${esc(item.shop)}</div>` : "";
+  const address = item.address ? `<div style="font-size:12px;color:rgba(255,255,255,.6);margin-top:2px;line-height:1.35">${esc(item.address)}</div>` : "";
+  const amount = item.amount ? `<div style="font-size:13px;color:#fff;margin-top:6px">待支付：${esc(item.amount)}</div>` : "";
+  const orderId = item.order_id ? `<div style="font-size:11px;color:rgba(255,255,255,.55);margin-top:2px">订单号：${esc(item.order_id)}</div>` : "";
+  const hasSpecWarning = /未匹配|切换失败/.test(item.note || "");
+  const noteLabel = hasSpecWarning ? "规格提醒" : "备注";
+  const noteColor = hasSpecWarning ? "#ffe1a8" : "rgba(255,255,255,.66)";
+  const note = item.note ? `<div style="font-size:11px;color:${noteColor};margin-top:6px;line-height:1.35">${noteLabel}：${esc(item.note)}</div>` : "";
+  const qrUrl = item.qr_url || item.url || "";
+  const qr = qrUrl ? `<img src="${esc(qrUrl)}" onclick="openImageViewer(this.src)" style="width:168px;max-width:100%;border-radius:8px;background:#fff;padding:8px;display:block;margin:10px auto 6px;cursor:pointer">` : "";
+  const payUrl = item.pay_url || "";
+  const payButton = payUrl ? `<a href="${esc(payUrl)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;padding:7px 12px;border-radius:999px;background:rgba(255,255,255,.16);color:#fff;text-decoration:none;font-size:13px">打开支付页</a>` : "";
+  const queryButton = item.order_id ? `<button type="button" data-order-id="${esc(item.order_id)}" onclick="crQueryLuckinOrderStatus(this)" style="border:none;display:inline-flex;align-items:center;justify-content:center;padding:7px 12px;border-radius:999px;background:rgba(75,210,176,.24);color:#fff;font-size:13px;cursor:pointer">查询取餐码</button>` : "";
+  const buttons = payButton || queryButton ? `<div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:8px">${payButton}${queryButton}</div>` : "";
+  return `<div class="luckin-pay-card" style="margin-top:8px;padding:12px;border:1px solid rgba(75,210,176,.45);background:rgba(16,86,76,.42);border-radius:10px;max-width:260px">
+    <div style="font-weight:700;color:#fff">瑞幸订单 · 扫码确认支付</div>
+    <div style="font-size:13px;color:#fff;margin-top:4px">${title}</div>
+    ${shop}${address}${amount}${orderId}${note}${qr}<div class="luckin-order-status"></div>${buttons}
+  </div>`;
+}
+
 function renderAttachments(atts) {
   if (!atts || !atts.length) return '';
   let html = '';
+  let musicHtml = '';
   atts.forEach(item => {
     const url = typeof item === 'string' ? item : (item.url || '');
     const type = (typeof item === 'object' && item.type) || '';
-    if (type === 'toy') {
+    if (type === 'luckin_payment') {
+      html += buildLuckinPaymentCard(item);
+    } else if (type === 'music') {
+      musicHtml += crBuildMusicCardHtml(item);
+    } else if (type === 'toy') {
       return;
     } else if (type === 'voice') {
       const dur = item.duration || 0;
@@ -2244,7 +3360,9 @@ function renderAttachments(atts) {
       html += `<img src="${esc(url)}" onclick="openImageViewer(this.src)">`;
     }
   });
-  return html ? '<div class="msg-media">' + html + '</div>' : '';
+  const musicBlock = musicHtml ? '<div class="music-cards-container">' + musicHtml + '</div>' : '';
+  const mediaBlock = html ? '<div class="msg-media">' + html + '</div>' : '';
+  return musicBlock + mediaBlock;
 }
 
 async function handleChatroomFileSelect(input) {
@@ -3140,8 +4258,6 @@ function crToyCloseEditor() { document.getElementById('crToyEditorOverlay').clas
   } else if (!currentRoom && rooms.length > 0) {
     await selectRoom(rooms[0].id);
   }
-  checkConnor();
-  setInterval(checkConnor, 30000);
   connectWS();
   resizeInput();
 })();

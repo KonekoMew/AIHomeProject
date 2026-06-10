@@ -9,6 +9,7 @@ from typing import Optional
 
 import aiosqlite
 from database import get_db
+from schedule import get_schedule_origin_name
 from ws import manager
 
 router = APIRouter()
@@ -30,7 +31,10 @@ async def list_schedules(status: Optional[str] = Query(None)):
             )
         else:
             cur = await db.execute("SELECT * FROM schedules ORDER BY trigger_at")
-        return [dict(r) for r in await cur.fetchall()]
+        rows = [dict(r) for r in await cur.fetchall()]
+        for row in rows:
+            row["origin_name"] = get_schedule_origin_name(row.get("origin"))
+        return rows
 
 
 @router.post("/api/schedules")
@@ -40,12 +44,13 @@ async def create_schedule(body: ScheduleCreate):
     trigger_at = body.trigger_at.replace("T", " ")
     async with get_db() as db:
         await db.execute(
-            "INSERT INTO schedules (id, type, trigger_at, content, created_at, status) VALUES (?,?,?,?,?,?)",
-            (sid, body.type, trigger_at, body.content, now, "active"),
+            "INSERT INTO schedules (id, type, trigger_at, content, created_at, status, origin, origin_room_id) VALUES (?,?,?,?,?,?,?,?)",
+            (sid, body.type, trigger_at, body.content, now, "active", "user", ""),
         )
         await db.commit()
     item = {"id": sid, "type": body.type, "trigger_at": trigger_at,
-            "content": body.content, "created_at": now, "status": "active"}
+            "content": body.content, "created_at": now, "status": "active",
+            "origin": "user", "origin_room_id": "", "origin_name": get_schedule_origin_name("user")}
     await manager.broadcast({"type": "schedule_changed"})
     return item
 

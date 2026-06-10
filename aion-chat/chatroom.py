@@ -8,7 +8,7 @@ from pathlib import Path
 
 import aiosqlite, httpx
 
-from config import DATA_DIR, DEFAULT_MODEL, load_worldbook
+from config import DATA_DIR, DEFAULT_MODEL, MODELS, load_worldbook
 from database import get_db
 from memory import get_embedding, cosine_similarity, _pack_embedding, _unpack_embedding, _keyword_match_score
 from ai_providers import call_codex_cli, stream_ai, CLI_STATUS_PREFIX, _build_cli_prompt
@@ -22,8 +22,10 @@ _DEFAULT_CONFIG = {
     "connor_url": "http://127.0.0.1:8787",
     "connor_poll_interval": 1.0,
     "connor_poll_timeout": 480,  # 8 分钟，与 Connor 后端 CODEX_TIMEOUT_MS 保持一致
-    "connor_name": "Connor",
+    "connor_name": "第二AI",
     "connor_persona": "",
+    "connor_persona_sections": {},
+    "connor_persona_evolution_enabled": False,
     "tts_enabled": False,
     "tts_aion_voice": "",
     "tts_connor_voice": "",
@@ -51,7 +53,7 @@ def get_chatroom_names() -> tuple[str, str, str]:
     cfg = load_chatroom_config()
     user_name = wb.get("user_name") or "用户"
     ai_name = wb.get("ai_name") or "AI"
-    connor_name = cfg.get("connor_name") or "Connor"
+    connor_name = cfg.get("connor_name") or "第二AI"
     return user_name, ai_name, connor_name
 
 
@@ -188,12 +190,37 @@ async def check_connor_online() -> bool:
 # ══════════════════════════════════════════════════
 
 _CONNOR_PERSONA_PATH = Path(__file__).parent.parent / "Connor-Codex" / "persona.md"
+_CONNOR_PERSONA_SECTION_LABELS = [
+    ("identity_core", "核心身份"),
+    ("relationship_core", "关系锚点"),
+    ("personality_core", "人格与判断"),
+    ("communication_style", "表达与互动方式"),
+    ("boundaries_and_forbidden", "边界与禁忌"),
+    ("relationship_protocol", "协议边界"),
+    ("tool_and_capability_rules", "能力与工具规则"),
+    ("prompt_hygiene_rules", "提示边界"),
+    ("evolution_notes", "用户信息"),
+]
+
+
+def _compile_connor_persona_sections(sections: dict) -> str:
+    parts = []
+    for key, label in _CONNOR_PERSONA_SECTION_LABELS:
+        value = (sections.get(key) or "").strip()
+        if value:
+            parts.append(f"[{label}]\n{value}")
+    return "\n\n".join(parts)
 
 
 def _read_connor_persona() -> str:
     """读取 Connor 全局人设：优先 chatroom_config，其次 persona.md 文件；勾选补充设定时拼接"""
     cfg = load_chatroom_config()
-    cfg_persona = cfg.get("connor_persona", "").strip()
+    cfg_sections = cfg.get("connor_persona_sections") or {}
+    if not isinstance(cfg_sections, dict):
+        cfg_sections = {}
+    cfg_persona = _compile_connor_persona_sections(cfg_sections).strip() if cfg_sections else ""
+    if not cfg_persona:
+        cfg_persona = cfg.get("connor_persona", "").strip()
     base = cfg_persona
     if not base and _CONNOR_PERSONA_PATH.exists():
         base = _CONNOR_PERSONA_PATH.read_text(encoding="utf-8").strip()
@@ -224,14 +251,17 @@ async def stream_connor_cli(prompt: str = None, *, messages: list[dict] = None):
             persona = _read_connor_persona()
             if persona:
                 messages = [{"role": "system", "content": persona}] + messages
-    async for chunk in call_codex_cli(messages, "", None):
+    codex_model = (MODELS.get("Codex") or {}).get("model", "")
+    async for chunk in call_codex_cli(messages, codex_model, None):
         yield chunk
 
 
-async def simple_connor_cli_call(prompt: str) -> Optional[str]:
+async def simple_connor_cli_call(prompt: str, model_key: str | None = None) -> Optional[str]:
     """非流式调用 Connor 模型，根据 connor_model 配置选择 Codex CLI 或 stream_ai"""
-    cfg = load_chatroom_config()
-    model_key = (cfg.get("connor_model") or "Codex").strip() or "Codex"
+    if model_key is None:
+        cfg = load_chatroom_config()
+        model_key = cfg.get("connor_model") or "Codex"
+    model_key = (model_key or "Codex").strip() or "Codex"
     full_text = ""
     if model_key == "Codex":
         async for chunk in stream_connor_cli(prompt):
@@ -311,16 +341,38 @@ async def recall_chatroom_memories(
     query_keywords: list[str] = None,
     top_k: int = 5,
     threshold: float = 0.45,
+    min_results: int = 0,
 ) -> list[dict]:
-    """从聊天室记忆表中召回相关记忆（所有房间共享）"""
+    """从 Connor 记忆库召回相关摘要记忆（所有聊天窗口共享）。"""
+    select_cols = (
+        "id, room_id, scope, scope AS type, content, keywords, importance, "
+        "embedding, source_start_ts, source_end_ts, created_at, unresolved, source_msg_id"
+    )
     query_emb = await get_embedding(query_text)
     if not query_emb:
-        return []
+        if min_results <= 0:
+            return []
+        async with get_db() as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                f"SELECT {select_cols} FROM chatroom_memories "
+                "ORDER BY unresolved DESC, importance DESC, created_at DESC LIMIT ?",
+                (min(top_k, min_results),),
+            )
+            rows = await cur.fetchall()
+        fallback = []
+        for row in rows:
+            mem = dict(row)
+            mem["score"] = 0.0
+            mem["vec_sim"] = 0.0
+            mem["kw_score"] = 0.0
+            fallback.append(mem)
+        return fallback
 
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT * FROM chatroom_memories WHERE embedding IS NOT NULL",
+            f"SELECT {select_cols} FROM chatroom_memories WHERE embedding IS NOT NULL",
         )
         rows = await cur.fetchall()
 
@@ -332,12 +384,24 @@ async def recall_chatroom_memories(
         kw_score = _keyword_match_score(query_keywords or [], mem.get("keywords", "")) if query_keywords else 0
         importance = mem.get("importance", 0.5)
         final = vec_sim * 0.6 + kw_score * 0.3 + importance * 0.1
-        if final >= threshold:
-            mem["score"] = round(final, 4)
-            scored.append(mem)
+        mem["score"] = round(final, 4)
+        mem["vec_sim"] = round(vec_sim, 4)
+        mem["kw_score"] = round(kw_score, 4)
+        mem["importance"] = round(float(importance or 0.5), 2)
+        scored.append(mem)
 
     scored.sort(key=lambda x: x["score"], reverse=True)
-    return scored[:top_k]
+    matched = [m for m in scored if m["score"] >= threshold][:top_k]
+    if min_results > 0 and len(matched) < min_results:
+        seen_ids = {m["id"] for m in matched}
+        for mem in scored:
+            if len(matched) >= min(top_k, min_results):
+                break
+            if mem["id"] in seen_ids:
+                continue
+            matched.append(mem)
+            seen_ids.add(mem["id"])
+    return matched[:top_k]
 
 
 async def build_surfacing_chatroom_memories(
@@ -360,7 +424,7 @@ async def build_surfacing_chatroom_memories(
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT id, content, type, created_at, keywords, importance, unresolved "
+            "SELECT id, content, scope AS type, created_at, keywords, importance, unresolved "
             "FROM chatroom_memories WHERE unresolved = 1 ORDER BY created_at DESC LIMIT 2"
         )
         unresolved_rows = await cur.fetchall()
@@ -375,7 +439,7 @@ async def build_surfacing_chatroom_memories(
             async with get_db() as db:
                 db.row_factory = aiosqlite.Row
                 cur = await db.execute(
-                    "SELECT id, content, type, created_at, embedding, keywords, importance "
+                    "SELECT id, content, scope AS type, created_at, embedding, keywords, importance "
                     "FROM chatroom_memories WHERE embedding IS NOT NULL"
                 )
                 rows = await cur.fetchall()
@@ -400,7 +464,7 @@ async def build_surfacing_chatroom_memories(
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT id, content, type, created_at FROM chatroom_memories "
+                "SELECT id, content, scope AS type, created_at FROM chatroom_memories "
                 "WHERE created_at > ? ORDER BY created_at DESC LIMIT ?",
                 (three_days_ago, max_total)
             )
@@ -507,18 +571,27 @@ async def save_chatroom_memory(
     source_start_ts: float = None,
     source_end_ts: float = None,
     unresolved: int = 0,
+    source_msg_id: str = None,
+    memory_kind: str = "long_term",
+    compression_stage: int = 0,
+    created_at: float = None,
 ) -> Optional[str]:
     """保存一条聊天室记忆"""
     emb = await get_embedding(content)
     emb_blob = _pack_embedding(emb) if emb else None
     mem_id = f"crm_{int(time.time() * 1000)}"
-    now = time.time()
+    now = float(created_at) if created_at else time.time()
+    kind = "daily" if memory_kind == "daily" else "long_term"
     async with get_db() as db:
         await db.execute(
             "INSERT INTO chatroom_memories "
-            "(id, room_id, scope, content, keywords, importance, embedding, source_start_ts, source_end_ts, created_at, unresolved) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (mem_id, room_id, scope, content, keywords, importance, emb_blob, source_start_ts, source_end_ts, now, unresolved),
+            "(id, room_id, scope, content, keywords, importance, embedding, source_start_ts, source_end_ts, "
+            "created_at, unresolved, source_msg_id, memory_kind, compression_stage) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                mem_id, room_id, scope, content, keywords, importance, emb_blob,
+                source_start_ts, source_end_ts, now, unresolved, source_msg_id, kind, compression_stage,
+            ),
         )
         await db.commit()
     return mem_id
@@ -545,7 +618,7 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
         msgs = []
         if connor_room:
             cur = await db.execute(
-                "SELECT sender, content, created_at FROM chatroom_messages "
+                "SELECT id, sender, content, created_at FROM chatroom_messages "
                 "WHERE room_id = ? AND created_at > ? AND sender != 'system' "
                 "ORDER BY created_at ASC",
                 (connor_room["id"], anchor_ts),
@@ -553,6 +626,7 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
             for r in await cur.fetchall():
                 d = dict(r)
                 d["_source"] = "private"
+                d["_source_id"] = f"chatroom:{d['id']}"
                 msgs.append(d)
 
         # ── 群聊消息 ──
@@ -562,7 +636,7 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
         group_room = await cur.fetchone()
         if group_room:
             cur = await db.execute(
-                "SELECT sender, content, created_at FROM chatroom_messages "
+                "SELECT id, sender, content, created_at FROM chatroom_messages "
                 "WHERE room_id = ? AND created_at > ? AND sender != 'system' "
                 "ORDER BY created_at ASC",
                 (group_room["id"], anchor_ts),
@@ -570,6 +644,7 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
             for r in await cur.fetchall():
                 d = dict(r)
                 d["_source"] = "group"
+                d["_source_id"] = f"chatroom:{d['id']}"
                 msgs.append(d)
 
         # 按时间排序合并
@@ -609,7 +684,7 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
             ts = time.strftime("%m-%d %H:%M", time.localtime(m["created_at"]))
             name = {"user": user_name, "aion": ai_name, "connor": connor_name}.get(m["sender"], m["sender"])
             tag = f"[{'群聊' if m.get('_source') == 'group' else '私聊'}]" if has_mixed else ""
-            formatted.append(f"[{ts}]{tag} {name}: {m['content'][:300]}")
+            formatted.append(f"[{ts}][id={m.get('_source_id', '')}]{tag} {name}: {m['content'][:300]}")
         messages_text = date_header + "\n".join(formatted)
 
         prompt_text = (
@@ -633,6 +708,11 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
             f"   - 0.1 - 0.3 (默认分数): 闲聊、情绪发泄、日常问候、没有信息增量的互动。\n"
             f"   【注意】：不要因为情绪激动就给高分，除非这揭示了新的性格特质。\n\n"
             f"4. \"unresolved\": Boolean。当摘要中包含**尚未完成**的计划、约定、承诺（如\"说好了要去…\"、\"打算下次…\"、\"答应了…\"、\"准备买…\"等），输出 true。纯粹的已发生事实输出 false。\n\n"
+            f"5. \"important_memory\": 默认为 null。只有当这段对话里出现【真正值得长期保存】的单个事实时，才输出一个对象；否则必须输出 null。\n"
+            f"   长期重要的门槛非常高：一年后仍会影响你如何陪伴/回应，或属于稳定偏好/雷区、关系或人物事实变化、明确长期承诺、健康安全、重大人生事件、核心价值观变化、长期项目关键决定。\n"
+            f"   以下绝对不要放入 important_memory：普通日常、吃喝玩乐流水账、临时调试/操作、短暂情绪、重复撒娇、普通计划、一次性闲聊、只适合写进 summary 的当天事件。\n"
+            f"   如果输出对象，格式为 {{\"content\":\"一条原子长期记忆\", \"keywords\":[\"词1\"], \"importance\":0.75-1.0, \"source_message_ids\":[\"chatroom:...\"], \"evidence\":\"一句话概括支持证据\", \"unresolved\":false}}。\n"
+            f"   每段最多 1 条 important_memory，宁可 null，不要凑数；importance 低于 0.75 的不能作为长期重要。\n\n"
             f"严格只输出一个 JSON 对象，不要输出任何其他内容。\n\n"
             f"【一段对话记录】：\n{messages_text}"
         )
@@ -665,7 +745,51 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
             source_start_ts=group[0]["created_at"],
             source_end_ts=group[-1]["created_at"],
             unresolved=1 if result.get("unresolved") else 0,
+            memory_kind="daily",
         )
+
+        important = result.get("important_memory")
+        if isinstance(important, dict):
+            important_summary = str(important.get("content") or "").strip()
+            try:
+                important_score = float(important.get("importance", 0.0))
+            except Exception:
+                important_score = 0.0
+            if important_summary and important_score >= 0.75:
+                important_keywords = important.get("keywords", [])
+                if isinstance(important_keywords, list):
+                    important_keywords_text = ",".join(str(k).strip() for k in important_keywords if str(k).strip())
+                else:
+                    important_keywords_text = str(important_keywords or "").strip()
+                source_by_id = {
+                    str(m.get("_source_id")): m
+                    for m in group
+                    if str(m.get("_source_id") or "").strip()
+                }
+                important_source_ids = [
+                    str(x).strip()
+                    for x in _json_list(important.get("source_message_ids"))
+                    if str(x).strip() in source_by_id
+                ][:3]
+                if important_source_ids:
+                    source_rows = [source_by_id[source_id] for source_id in important_source_ids]
+                    important_source_start = min((m["created_at"] for m in source_rows), default=group[0]["created_at"])
+                    important_source_end = max((m["created_at"] for m in source_rows), default=group[-1]["created_at"])
+                    important_source_json = json.dumps(important_source_ids, ensure_ascii=False)
+                    saved_important_id = await save_chatroom_memory(
+                        room_id=store_room_id,
+                        scope="connor",
+                        content=important_summary,
+                        keywords=important_keywords_text,
+                        importance=max(0.75, min(1.0, important_score)),
+                        source_start_ts=important_source_start,
+                        source_end_ts=important_source_end,
+                        unresolved=1 if important.get("unresolved") else 0,
+                        source_msg_id=important_source_json,
+                        memory_kind="long_term",
+                    )
+                    if saved_important_id:
+                        total_new += 1
 
         # 每成功处理一组，推进锚点到该组最后一条消息
         async with get_db() as db:
@@ -826,10 +950,10 @@ async def build_aion_group_context(
     wb = load_worldbook()
     user_name, ai_name, connor_name = get_chatroom_names()
     if wb.get("ai_persona"):
-        history.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        history.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         history.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        history.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        history.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         history.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
     if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
         history.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
@@ -846,10 +970,12 @@ async def build_aion_group_context(
     history.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
 
     # 3. 构建 recent_messages 用于 instant_digest
+    merged = await fetch_merged_timeline("aion", context_limit, room_id=room_id)
+
     recent_for_digest = []
-    for msg in room_messages[-6:]:
+    for msg in merged[-6:]:
         sender = msg.get("sender", "user")
-        role = "assistant" if sender == "aion" else "user"
+        role = "assistant" if sender in ("aion", "assistant") else "user"
         recent_for_digest.append({"role": role, "content": msg.get("content", "")[:200]})
     actual_recent = [m for m in recent_for_digest if m["role"] in ("user", "assistant")][-3:]
 
@@ -883,7 +1009,6 @@ async def build_aion_group_context(
     history.append({"role": "assistant", "content": "明白了。"})
 
     # 6. 统一时间线（合并私聊 + 群聊消息）
-    merged = await fetch_merged_timeline("aion", context_limit, room_id=room_id)
     timeline_history = render_merged_timeline(merged, "aion")
     history.extend(timeline_history)
 
@@ -915,7 +1040,7 @@ async def build_connor_group_context(
         history.append({"role": "user", "content": f"[系统设定 - 你的角色设定]\n{connor_full_persona}"})
         history.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        history.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        history.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         history.append({"role": "assistant", "content": "收到，我会记住用户的信息。"})
 
     # 1. 注入系统能力
@@ -929,8 +1054,10 @@ async def build_connor_group_context(
     history.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
 
     # 2. 构建 recent_messages 用于 instant_digest
+    merged = await fetch_merged_timeline("connor", context_limit, room_id=room_id)
+
     recent_for_digest = []
-    for msg in room_messages[-6:]:
+    for msg in merged[-6:]:
         sender = msg.get("sender", "user")
         role = "assistant" if sender == "connor" else "user"
         recent_for_digest.append({"role": role, "content": msg.get("content", "")[:200]})
@@ -938,7 +1065,7 @@ async def build_connor_group_context(
 
     # 3. 记忆召回（Connor 只读聊天室记忆，不读 Aion 主记忆库）
     async def _chatroom_recall(query, keywords):
-        return await recall_chatroom_memories(query, room_id, "connor", keywords, top_k=5)
+        return await recall_chatroom_memories(query, room_id, "connor", keywords, top_k=5, min_results=3)
 
     async def _chatroom_surfacing(topic, keywords):
         return await build_surfacing_chatroom_memories(topic, keywords)
@@ -954,6 +1081,7 @@ async def build_connor_group_context(
         chatroom_surfacing_fn=_chatroom_surfacing,
         chatroom_source_fn=_chatroom_source,
         digest_result=digest_result,
+        always_include_recalled=True,
     )
 
     history.append({"role": "user", "content": mem_result["time_block"]})
@@ -1006,16 +1134,17 @@ async def build_connor_1v1_context(
         messages.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
 
     if wb.get("user_persona"):
-        messages.append({"role": "user", "content": f"[用户信息]\n{wb['user_persona']}"})
+        messages.append({"role": "user", "content": f"[{user_name}信息]\n{wb['user_persona']}"})
         messages.append({"role": "assistant", "content": "收到，我会记住用户的信息。"})
 
     ability_block = await build_ability_block(user_name, who="connor", whisper_mode=whisper_mode)
     messages.append({"role": "user", "content": ability_block})
+    merged = await fetch_merged_timeline("connor", context_limit)
     messages.append({"role": "assistant", "content": "好的，需要时我会使用这些指令。"})
 
     # 构建 recent_messages 用于 instant_digest（前置哨兵）
     recent_for_digest = []
-    for msg in room_messages[-6:]:
+    for msg in merged[-6:]:
         sender = msg.get("sender", "user")
         role = "assistant" if sender == "connor" else "user"
         recent_for_digest.append({"role": role, "content": msg.get("content", "")[:200]})
@@ -1023,7 +1152,7 @@ async def build_connor_1v1_context(
 
     # 记忆召回（走统一 build_memory_blocks，含前置哨兵 + 背景浮现 + 原文追溯）
     async def _chatroom_recall(query, keywords):
-        return await recall_chatroom_memories(query, room_id, "connor", keywords, top_k=5)
+        return await recall_chatroom_memories(query, room_id, "connor", keywords, top_k=5, min_results=3)
 
     async def _chatroom_surfacing(topic, keywords):
         return await build_surfacing_chatroom_memories(topic, keywords)
@@ -1039,6 +1168,7 @@ async def build_connor_1v1_context(
         chatroom_surfacing_fn=_chatroom_surfacing,
         chatroom_source_fn=_chatroom_source,
         digest_result=digest_result,
+        always_include_recalled=True,
     )
 
     messages.append({"role": "user", "content": mem_result["time_block"]})
@@ -1056,7 +1186,6 @@ async def build_connor_1v1_context(
     messages.append({"role": "assistant", "content": "明白了。"})
 
     # 统一时间线（合并 Connor 1v1 + 群聊消息，保留附件）
-    merged = await fetch_merged_timeline("connor", context_limit)
     timeline_history = render_merged_timeline(merged, "connor")
     messages.extend(timeline_history)
 

@@ -3,12 +3,12 @@
 """
 
 import json, time, asyncio, random, re, mimetypes
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pathlib import Path
 from datetime import date
 
 import aiosqlite, httpx
-from fastapi import APIRouter, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -16,7 +16,7 @@ from config import DEFAULT_MODEL, DATA_DIR, CODEX_UPLOADS_DIR, MODELS
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
-from tts import TTSStreamer
+from tts import TTSStreamer, synthesize_message_tts_later
 from chatroom import (
     send_to_connor, check_connor_online, load_chatroom_config, save_chatroom_config,
     get_chatroom_names,
@@ -33,10 +33,11 @@ from context_builder import (
     PRIVATE_WHISPER_CMD_PATTERN, VIDEO_CALL_CMD, META_TAG_PATTERN, strip_tool_commands,
     append_message_meta,
 )
-from memory import get_embedding, _pack_embedding
+from memory import get_embedding, _pack_embedding, memory_kind_for_type, memory_kind_label
 from schedule import process_schedule_commands, ALARM_CMD, REMINDER_CMD, MONITOR_CMD, _parse_dt, _is_schedule_time_stale
 from music import search_songs, get_audio_url
 from camera import cam, CAM_CHECK_CMD
+from luckin import handle_luckin_commands, luckin_payment_attachments
 
 router = APIRouter(prefix="/api/chatroom", tags=["chatroom"])
 
@@ -60,6 +61,16 @@ def _normalize_cli_bubble_breaks(text: str, model_key: str | None) -> str:
         return text
 
     return "\n\n".join(lines)
+
+
+def _chatroom_auto_tts_voice(sender: str) -> str:
+    if sender not in ("aion", "connor"):
+        return ""
+    cfg = load_chatroom_config()
+    if not cfg.get("tts_enabled"):
+        return ""
+    key = "tts_aion_voice" if sender == "aion" else "tts_connor_voice"
+    return (cfg.get(key) or "").strip()
 
 
 # ══════════════════════════════════════════════════
@@ -114,17 +125,19 @@ def _process_voice_attachments(history: list):
 #  群聊工具指令处理
 # ══════════════════════════════════════════════════
 
-async def _chatroom_sys_msg(room_id: str, text: str, _q: asyncio.Queue):
+async def _chatroom_sys_msg(room_id: str, text: str, _q: asyncio.Queue, after_msg_id: str = None):
     """在聊天室中插入系统消息气泡"""
     now = time.time()
     msg_id = f"cm_{int(now * 1000)}_sys"
+    order_atts = [{"type": "system_notice_order", "after_msg_id": after_msg_id}] if after_msg_id else []
+    att_json = json.dumps(order_atts, ensure_ascii=False) if order_atts else "[]"
     async with get_db() as db:
         await db.execute(
             "INSERT INTO chatroom_messages (id, room_id, sender, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-            (msg_id, room_id, "system", text, now, "[]"),
+            (msg_id, room_id, "system", text, now, att_json),
         )
         await db.commit()
-    msg = {"id": msg_id, "room_id": room_id, "sender": "system", "content": text, "created_at": now, "attachments": []}
+    msg = {"id": msg_id, "room_id": room_id, "sender": "system", "content": text, "created_at": now, "attachments": order_atts}
     await _q.put({"type": "system_msg", "message": msg})
 
 
@@ -167,6 +180,8 @@ async def _save_main_memory_from_chatroom(room_id: str, msg_id: str, content: st
         "source_start_ts": None,
         "source_end_ts": None,
         "source_msg_id": msg_id,
+        "memory_kind": memory_kind_for_type("重要事件"),
+        "memory_kind_label": memory_kind_label("重要事件"),
     }
 
 
@@ -286,7 +301,7 @@ async def _send_private_whisper(who_identity: str, content: str):
 
 async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg_id: str, _q: asyncio.Queue) -> tuple[str, dict]:
     """处理 AI 回复中的工具指令，执行副作用，返回 (清理后的文本, 触发的后续动作信息)。
-    who: 'Aion' 或 'Connor'"""
+    who: 内部身份 aion 或 connor"""
     from ws import manager as ws_manager
     triggered = {}  # 收集需要后续处理的动作
     who_identity = "connor" if who.lower() == "connor" else "aion"
@@ -323,8 +338,9 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
 
     if music_cards:
         parts = [f"《{s['name']}》- {s['artist']}" for s in music_cards]
-        await _chatroom_sys_msg(room_id, f"🎵 {who_label}点了一首{' / '.join(parts)}", _q)
+        await _chatroom_sys_msg(room_id, f"🎵 {who_label}点了一首{' / '.join(parts)}", _q, after_msg_id=msg_id)
         music_data = {"type": "music", "msg_id": msg_id, "cards": music_cards, "autoplay": True}
+        triggered["music_cards"] = music_cards
         await _q.put(music_data)
         await ws_manager.broadcast({"type": "music", "data": {**music_data, "source": "chatroom"}})
 
@@ -334,7 +350,7 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
             raw_dt, content = match.group(1), match.group(2)
             dt = _parse_dt(raw_dt)
             if dt and content.strip() and not _is_schedule_time_stale(dt):
-                await _chatroom_sys_msg(room_id, f"⏰ {who_label}设置了 {dt.replace('T', ' ')} 的闹铃：{content.strip()}", _q)
+                await _chatroom_sys_msg(room_id, f"⏰ 【{who_label}】设定了闹铃：{dt.replace('T', ' ')}，内容：{content.strip()}", _q, after_msg_id=msg_id)
         except Exception:
             pass
     for match in REMINDER_CMD.finditer(full_text):
@@ -342,7 +358,7 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
             raw_dt, content = match.group(1), match.group(2)
             dt = _parse_dt(raw_dt)
             if dt and content.strip() and not _is_schedule_time_stale(dt):
-                await _chatroom_sys_msg(room_id, f"📅 {who_label}设置了 {dt.replace('T', ' ')} 的日程：{content.strip()}", _q)
+                await _chatroom_sys_msg(room_id, f"📅 【{who_label}】设定了日程：{dt.replace('T', ' ')}，内容：{content.strip()}", _q, after_msg_id=msg_id)
         except Exception:
             pass
     for match in MONITOR_CMD.finditer(full_text):
@@ -350,7 +366,7 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
             raw_dt, content = match.group(1), match.group(2)
             dt = _parse_dt(raw_dt)
             if dt and content.strip() and not _is_schedule_time_stale(dt):
-                await _chatroom_sys_msg(room_id, f"👀 {who_label}设置了 {dt.replace('T', ' ')} 的定时查岗：{content.strip()}", _q)
+                await _chatroom_sys_msg(room_id, f"👀 【{who_label}】设定了监督：{dt.replace('T', ' ')}，内容：{content.strip()}", _q, after_msg_id=msg_id)
         except Exception:
             pass
     _origin = "connor" if who.lower() == "connor" else "aion"
@@ -360,11 +376,21 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
     from routes.chat import _process_home_commands
     full_text = await _process_home_commands(full_text)
 
+    full_text, luckin_results = await handle_luckin_commands(full_text)
+    if luckin_results:
+        luckin_atts = luckin_payment_attachments(luckin_results)
+        if luckin_atts:
+            triggered["luckin_payment"] = luckin_atts
+        if any(item.get("ok") for item in luckin_results):
+            await _chatroom_sys_msg(room_id, f"{who_label}创建了瑞幸咖啡订单，等待支付确认", _q, after_msg_id=msg_id)
+        else:
+            await _chatroom_sys_msg(room_id, f"{who_label}的瑞幸咖啡下单未完成", _q, after_msg_id=msg_id)
+
     # ── 查岗 ──
     cam_triggered = CAM_CHECK_CMD in full_text
     if cam_triggered:
         full_text = full_text.replace(CAM_CHECK_CMD, "")
-        await _chatroom_sys_msg(room_id, f"📷 {who_label}查看了监控", _q)
+        await _chatroom_sys_msg(room_id, f"📷 {who_label}查看了监控", _q, after_msg_id=msg_id)
         triggered["cam_check"] = True
 
     # ── 查看动态 ──
@@ -376,7 +402,7 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
             activity_n = 6
         activity_n = max(1, min(12, activity_n)) if activity_n > 0 else 6
         full_text = ACTIVITY_CHECK_PATTERN.sub("", full_text)
-        await _chatroom_sys_msg(room_id, f"📊 {who_label}查看了用户动态", _q)
+        await _chatroom_sys_msg(room_id, f"📊 {who_label}查看了用户动态", _q, after_msg_id=msg_id)
         triggered["activity"] = activity_n
 
     # ── MOMENT (朋友圈) ──
@@ -423,15 +449,15 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
                         mem_data = await _save_main_memory_from_chatroom(room_id, msg_id, mem_content)
                         await ws_manager.broadcast({"type": "memory_added", "data": mem_data})
                         mem_id = mem_data["id"]
-                        target_label = "Aion记忆库"
+                        target_label = f"{who_label}记忆库"
                     else:
                         # Connor 的显式记忆始终进入聊天室/Connor 记忆库；群聊中也按 Connor 作用域保存。
                         mem_id = await save_chatroom_memory(
                             room_id=room_id, scope="connor", content=mem_content,
                             keywords="", importance=0.5,
                         )
-                        target_label = "Connor记忆库"
-                    await _chatroom_sys_msg(room_id, f"💾 {who_label}记住了：{mem_content[:50]}", _q)
+                        target_label = f"{who_label}记忆库"
+                    await _chatroom_sys_msg(room_id, f"💾 {who_label}记住了：{mem_content[:50]}", _q, after_msg_id=msg_id)
                     mr_data = {
                         "type": "memory_record",
                         "msg_id": msg_id,
@@ -524,6 +550,46 @@ def _toy_attachments_from_triggered(triggered: dict) -> list[dict]:
     return [{"type": "toy", "commands": commands}]
 
 
+def _music_attachments_from_triggered(triggered: dict) -> list[dict]:
+    cards = triggered.get("music_cards") or []
+    if not cards:
+        return []
+    attachments = []
+    for song in cards:
+        if not isinstance(song, dict):
+            continue
+        item = {
+            "type": "music",
+            "id": song.get("id"),
+            "name": song.get("name", ""),
+            "artist": song.get("artist", ""),
+            "album": song.get("album", ""),
+            "cover": song.get("cover", ""),
+        }
+        if song.get("audio_url"):
+            item["audio_url"] = song.get("audio_url")
+        candidates = []
+        for candidate in song.get("candidates") or []:
+            if not isinstance(candidate, dict):
+                continue
+            candidates.append({
+                "id": candidate.get("id"),
+                "name": candidate.get("name", ""),
+                "artist": candidate.get("artist", ""),
+                "album": candidate.get("album", ""),
+                "cover": candidate.get("cover", ""),
+            })
+        if candidates:
+            item["candidates"] = candidates
+        attachments.append(item)
+    return attachments
+
+
+def _luckin_attachments_from_triggered(triggered: dict) -> list[dict]:
+    attachments = triggered.get("luckin_payment") or []
+    return [item for item in attachments if isinstance(item, dict)]
+
+
 # ══════════════════════════════════════════════════
 #  群聊工具指令后续动作（异步执行）
 # ══════════════════════════════════════════════════
@@ -563,6 +629,7 @@ async def _chatroom_cam_check(room_id: str, sender: str, model_key: str, delay: 
 
     wb = load_worldbook()
     user_name = wb.get("user_name", "用户")
+    ai_name = wb.get("ai_name", "AI")
 
     # 获取聊天室最近消息作为上下文
     _, msgs = await _load_room_and_messages(room_id, limit=10)
@@ -576,10 +643,10 @@ async def _chatroom_cam_check(room_id: str, sender: str, model_key: str, delay: 
 
     prefix_msgs = []
     if wb.get("ai_persona") and sender == "aion":
-        prefix_msgs.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix_msgs.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix_msgs.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        prefix_msgs.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        prefix_msgs.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         prefix_msgs.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
 
     messages = prefix_msgs + recent + [
@@ -622,6 +689,7 @@ async def _chatroom_activity_check(room_id: str, sender: str, model_key: str, n:
 
     wb = load_worldbook()
     user_name = wb.get("user_name", "用户")
+    ai_name = wb.get("ai_name", "AI")
     minutes = n * 10
 
     # 获取聊天室最近消息作为上下文
@@ -637,10 +705,10 @@ async def _chatroom_activity_check(room_id: str, sender: str, model_key: str, n:
     # 构建 prompt
     prefix_msgs = []
     if wb.get("ai_persona") and sender == "aion":
-        prefix_msgs.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix_msgs.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix_msgs.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        prefix_msgs.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        prefix_msgs.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         prefix_msgs.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
 
     messages = prefix_msgs + recent + [{"role": "user", "content": activity_prompt}]
@@ -733,6 +801,7 @@ async def _chatroom_poi_check(room_id: str, sender: str, model_key: str, categor
 
     wb = load_worldbook()
     user_name = wb.get("user_name", "用户")
+    ai_name = wb.get("ai_name", "AI")
     loc_prompt = format_location_for_prompt()
     poi_prompt = (
         f"你刚才想帮{user_name}搜索周边信息，以下是系统根据{user_name}最新实时坐标搜索到的结果：\n\n"
@@ -746,7 +815,7 @@ async def _chatroom_poi_check(room_id: str, sender: str, model_key: str, categor
 
     prefix_msgs = []
     if wb.get("ai_persona") and sender == "aion":
-        prefix_msgs.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix_msgs.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix_msgs.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
 
     messages = prefix_msgs + recent + [{"role": "user", "content": poi_prompt}]
@@ -881,15 +950,60 @@ def _resolve_connor_model(model_key: str | None = None) -> str:
     return (model_key or load_chatroom_config().get("connor_model") or "Codex").strip() or "Codex"
 
 
-async def _stream_connor_model(messages: list[dict], model_key: str | None = None):
+async def _stream_connor_model(messages: list[dict], model_key: str | None = None, meta: dict | None = None):
     """Connor 默认走 Codex CLI；选择其他模型时复用统一模型线路。"""
     key = _resolve_connor_model(model_key)
     if key == "Codex":
         async for chunk in stream_connor_cli(messages=messages):
             yield chunk
     else:
-        async for chunk in stream_ai(messages, key, {}):
+        async for chunk in stream_ai(messages, key, meta if meta is not None else {}):
             yield chunk
+
+
+def _chatroom_debug_payload(
+    *,
+    room_id: str,
+    model_key: str,
+    msg_id: str,
+    history: list[dict],
+    digest_result: dict | None,
+    usage_meta: dict | None = None,
+    has_error: bool = False,
+    error_text: str | None = None,
+) -> dict:
+    digest = digest_result or {}
+    keywords = digest.get("keywords") or []
+    if isinstance(keywords, str):
+        keywords_text = keywords
+    else:
+        keywords_text = "、".join(str(k) for k in keywords if k)
+
+    return {
+        "type": "debug",
+        "room_id": room_id,
+        "model": model_key,
+        "msg_id": msg_id,
+        "recall_keywords": keywords_text,
+        "recall_query": digest.get("recall_query", ""),
+        "recall_topic": digest.get("topic", ""),
+        "is_search_needed": digest.get("is_search_needed", False),
+        "recalled_memories": digest.get("recalled_memories") or [],
+        "debug_top6": digest.get("debug_top6") or [],
+        "prompt_messages": [
+            {"role": m.get("role", ""), "content": str(m.get("content", ""))[:500]}
+            for m in (history or [])
+        ],
+        "prompt_count": len(history or []),
+        "usage": usage_meta if usage_meta else None,
+        "has_error": has_error,
+        "error_text": error_text if has_error else None,
+    }
+
+
+async def _emit_chatroom_debug(_q: asyncio.Queue, payload: dict):
+    await _q.put(payload)
+    await manager.broadcast({"type": "debug", "data": payload})
 
 
 # ── Pydantic 模型 ──
@@ -959,16 +1073,23 @@ class MsgRegenerate(BaseModel):
     whisper_mode: bool = False
 
 
+class MessageFeedbackUpdate(BaseModel):
+    rating: str
+    reason: str
+
+
 class MemoryCreate(BaseModel):
     content: str
     keywords: str = ""
     importance: float = 0.5
+    memory_kind: str = "long_term"
 
 
 class MemoryUpdate(BaseModel):
     content: Optional[str] = None
     keywords: Optional[str] = None
     importance: Optional[float] = None
+    memory_kind: Optional[str] = None
 
 
 class MemorySourceSelection(BaseModel):
@@ -979,9 +1100,19 @@ async def _ensure_chatroom_memory_source_column():
     async with get_db() as db:
         try:
             await db.execute("ALTER TABLE chatroom_memories ADD COLUMN source_msg_id TEXT")
-            await db.commit()
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN memory_kind TEXT DEFAULT 'long_term'")
+        except Exception:
+            pass
+        await db.execute(
+            "UPDATE chatroom_memories SET memory_kind='daily' "
+            "WHERE (memory_kind IS NULL OR memory_kind='' OR memory_kind='long_term') "
+            "AND source_start_ts IS NOT NULL AND source_end_ts IS NOT NULL "
+            "AND (source_msg_id IS NULL OR TRIM(source_msg_id)='')"
+        )
+        await db.commit()
 
 
 def _json_list(value):
@@ -1091,6 +1222,8 @@ class ConfigUpdate(BaseModel):
     connor_poll_timeout: Optional[int] = None
     connor_name: Optional[str] = None
     connor_persona: Optional[str] = None
+    connor_persona_sections: Optional[Dict[str, str]] = None
+    connor_persona_evolution_enabled: Optional[bool] = None
     connor_persona_extra: Optional[str] = None
     connor_persona_extra_enabled: Optional[bool] = None
     tts_enabled: Optional[bool] = None
@@ -1131,6 +1264,12 @@ async def update_config(body: ConfigUpdate):
         cfg["connor_name"] = body.connor_name
     if body.connor_persona is not None:
         cfg["connor_persona"] = body.connor_persona
+        if body.connor_persona_sections is None:
+            cfg["connor_persona_sections"] = {}
+    if body.connor_persona_sections is not None:
+        cfg["connor_persona_sections"] = body.connor_persona_sections
+    if body.connor_persona_evolution_enabled is not None:
+        cfg["connor_persona_evolution_enabled"] = body.connor_persona_evolution_enabled
     if body.connor_persona_extra is not None:
         cfg["connor_persona_extra"] = body.connor_persona_extra
     if body.connor_persona_extra_enabled is not None:
@@ -1379,11 +1518,59 @@ async def delete_message(msg_id: str):
     return {"ok": True}
 
 
+@router.patch("/messages/{msg_id}/feedback")
+async def update_message_feedback(msg_id: str, body: MessageFeedbackUpdate):
+    rating = (body.rating or "").strip().lower()
+    reason = (body.reason or "").strip()
+    if rating not in ("like", "dislike"):
+        raise HTTPException(status_code=400, detail="rating must be like or dislike")
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason is required")
+    now = time.time()
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT m.*, r.type AS room_type FROM chatroom_messages m "
+            "JOIN chatroom_rooms r ON r.id = m.room_id WHERE m.id=?",
+            (msg_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="message not found")
+        can_rate = (
+            row["room_type"] == "group" and row["sender"] in ("aion", "connor")
+        ) or (
+            row["room_type"] == "connor_1v1" and row["sender"] == "connor"
+        )
+        if not can_rate:
+            raise HTTPException(status_code=400, detail="only AI messages can be rated here")
+        created_at = row["ai_feedback_created_at"] or now
+        await db.execute(
+            "UPDATE chatroom_messages SET ai_feedback_rating=?, ai_feedback_reason=?, "
+            "ai_feedback_created_at=?, ai_feedback_updated_at=? WHERE id=?",
+            (rating, reason, created_at, now, msg_id),
+        )
+        await db.commit()
+        cur = await db.execute("SELECT * FROM chatroom_messages WHERE id=?", (msg_id,))
+        updated = await cur.fetchone()
+        data = _chatroom_message_dict(updated)
+        await manager.broadcast({"type": "chatroom_msg_updated", "data": data})
+    return {"ok": True, "message": data}
+
+
 # ══════════════════════════════════════════════════
 #  发送消息 + AI 回复 (SSE)
 # ══════════════════════════════════════════════════
 
-async def _save_msg(room_id: str, sender: str, content: str, msg_id: str = None, attachments: list = None) -> dict:
+async def _save_msg(
+    room_id: str,
+    sender: str,
+    content: str,
+    msg_id: str = None,
+    attachments: list = None,
+    *,
+    auto_tts: bool = True,
+) -> dict:
     """保存消息到数据库"""
     now = time.time()
     if not msg_id:
@@ -1400,6 +1587,11 @@ async def _save_msg(room_id: str, sender: str, content: str, msg_id: str = None,
     msg = {"id": msg_id, "room_id": room_id, "sender": sender, "content": content,
            "created_at": now, "attachments": att_list}
     await manager.broadcast({"type": "chatroom_msg_created", "data": msg})
+
+    if auto_tts and content.strip():
+        voice = _chatroom_auto_tts_voice(sender)
+        if voice:
+            synthesize_message_tts_later(msg_id, content, voice, manager)
 
     # Connor 相关消息产生时重置自动总结计时器（私聊和群聊都触发）
     async with get_db() as _db:
@@ -1772,7 +1964,7 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
     connor_label = _name_for_identity("connor")
     query_text = msgs[-1]["content"] if msgs else ""
 
-    connor_messages, _ = await build_connor_1v1_context(
+    connor_messages, digest_out = await build_connor_1v1_context(
         room_id, msgs,
         context_limit=context_limit,
         query_text=query_text,
@@ -1785,8 +1977,11 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
 
     full_text = ""
     has_reply = False
+    has_error = False
+    error_text = None
+    usage_meta: dict = {}
     try:
-        async for chunk in _stream_connor_model(connor_messages, connor_model_key):
+        async for chunk in _stream_connor_model(connor_messages, connor_model_key, usage_meta):
             if chunk.startswith(CLI_STATUS_PREFIX):
                 await _q.put({"type": "connor_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                 continue
@@ -1794,6 +1989,8 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
             full_text += chunk
             await _q.put({"type": "connor_chunk", "content": chunk})
     except Exception as e:
+        has_error = True
+        error_text = str(e)
         full_text += f"\n[{connor_label} 回复出错: {e}]"
         await _q.put({"type": "connor_chunk", "content": f"\n[回复出错: {e}]"})
 
@@ -1803,7 +2000,7 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
 
     # 工具指令处理（从文本中剥离并执行，与群聊保持一致）
     try:
-        clean_text, triggered = await _process_chatroom_commands(full_text, room_id, "Connor", connor_msg_id, _q)
+        clean_text, triggered = await _process_chatroom_commands(full_text, room_id, "connor", connor_msg_id, _q)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1821,8 +2018,22 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
 
     reply = _rewrite_connor_paths(clean_text)
     saved_imgs = await _extract_and_save_images(reply)
-    msg = await _save_msg(room_id, "connor", reply, connor_msg_id, attachments=saved_imgs)
+    msg = await _save_msg(
+        room_id, "connor", reply, connor_msg_id,
+        attachments=saved_imgs + _music_attachments_from_triggered(triggered) + _luckin_attachments_from_triggered(triggered),
+        auto_tts=not (tts_enabled and tts_connor_voice and clean_text),
+    )
     await _q.put({"type": "connor_done", "message": msg})
+    await _emit_chatroom_debug(_q, _chatroom_debug_payload(
+        room_id=room_id,
+        model_key=connor_model_key,
+        msg_id=connor_msg_id,
+        history=connor_messages,
+        digest_result=digest_out,
+        usage_meta=usage_meta,
+        has_error=has_error,
+        error_text=error_text,
+    ))
 
     # 触发后续动作
     _fire_chatroom_followups(triggered, room_id, "connor", connor_model_key)
@@ -1865,20 +2076,25 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
     await _q.put({"type": "aion_start", "id": aion_msg_id})
 
     full_text = ""
+    has_error = False
+    error_text = None
+    usage_meta: dict = {}
     try:
-        async for chunk in stream_ai(aion_history, model_key, {}):
+        async for chunk in stream_ai(aion_history, model_key, usage_meta):
             if chunk.startswith(CLI_STATUS_PREFIX):
                 await _q.put({"type": "aion_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                 continue
             full_text += chunk
             await _q.put({"type": "aion_chunk", "content": chunk})
     except Exception as e:
+        has_error = True
+        error_text = str(e)
         full_text += f"\n[{ai_label} 回复出错: {e}]"
         await _q.put({"type": "aion_chunk", "content": f"\n[回复出错: {e}]"})
 
     # 工具指令处理（从文本中剥离并执行）
     try:
-        clean_text, triggered = await _process_chatroom_commands(full_text, room_id, "Aion", aion_msg_id, _q)
+        clean_text, triggered = await _process_chatroom_commands(full_text, room_id, "aion", aion_msg_id, _q)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1898,9 +2114,20 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
     saved_imgs = await _extract_and_save_images(clean_text)
     aion_msg = await _save_msg(
         room_id, "aion", clean_text, aion_msg_id,
-        attachments=saved_imgs + _toy_attachments_from_triggered(triggered),
+        attachments=saved_imgs + _music_attachments_from_triggered(triggered) + _luckin_attachments_from_triggered(triggered) + _toy_attachments_from_triggered(triggered),
+        auto_tts=not (tts_enabled and tts_voice and clean_text),
     )
     await _q.put({"type": "aion_done", "message": aion_msg})
+    await _emit_chatroom_debug(_q, _chatroom_debug_payload(
+        room_id=room_id,
+        model_key=model_key,
+        msg_id=aion_msg_id,
+        history=aion_history,
+        digest_result=digest_out,
+        usage_meta=usage_meta,
+        has_error=has_error,
+        error_text=error_text,
+    ))
 
     # 触发后续动作（异步，不阻塞后续 AI 回复）
     _fire_chatroom_followups(triggered, room_id, "aion", model_key)
@@ -1920,14 +2147,19 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
     await _q.put({"type": "connor_start", "id": connor_msg_id})
 
     full_text = ""
+    has_error = False
+    error_text = None
+    usage_meta: dict = {}
     try:
-        async for chunk in _stream_connor_model(connor_history, connor_model_key):
+        async for chunk in _stream_connor_model(connor_history, connor_model_key, usage_meta):
             if chunk.startswith(CLI_STATUS_PREFIX):
                 await _q.put({"type": "connor_status", "text": chunk[len(CLI_STATUS_PREFIX):]})
                 continue
             full_text += chunk
             await _q.put({"type": "connor_chunk", "content": chunk})
     except Exception as e:
+        has_error = True
+        error_text = str(e)
         full_text += f"\n[{connor_label} 回复出错: {e}]"
         await _q.put({"type": "connor_chunk", "content": f"\n[回复出错: {e}]"})
 
@@ -1937,7 +2169,7 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
 
     # 工具指令处理
     try:
-        clean_text, triggered = await _process_chatroom_commands(full_text, room_id, "Connor", connor_msg_id, _q)
+        clean_text, triggered = await _process_chatroom_commands(full_text, room_id, "connor", connor_msg_id, _q)
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -1957,9 +2189,20 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
     saved_imgs = await _extract_and_save_images(clean_text)
     connor_msg = await _save_msg(
         room_id, "connor", clean_text, connor_msg_id,
-        attachments=saved_imgs + _toy_attachments_from_triggered(triggered),
+        attachments=saved_imgs + _music_attachments_from_triggered(triggered) + _luckin_attachments_from_triggered(triggered) + _toy_attachments_from_triggered(triggered),
+        auto_tts=not (tts_enabled and tts_voice and clean_text),
     )
     await _q.put({"type": "connor_done", "message": connor_msg})
+    await _emit_chatroom_debug(_q, _chatroom_debug_payload(
+        room_id=room_id,
+        model_key=connor_model_key,
+        msg_id=connor_msg_id,
+        history=connor_history,
+        digest_result=digest_out,
+        usage_meta=usage_meta,
+        has_error=has_error,
+        error_text=error_text,
+    ))
 
     # 触发后续动作
     _fire_chatroom_followups(triggered, room_id, "connor", connor_model_key)
@@ -2061,13 +2304,20 @@ async def list_room_memories(room_id: str):
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT id, room_id, scope, content, keywords, importance, created_at, unresolved, source_start_ts, source_end_ts, source_msg_id "
+            "SELECT id, room_id, scope, content, keywords, importance, created_at, unresolved, "
+            "source_start_ts, source_end_ts, source_msg_id, memory_kind "
             "FROM chatroom_memories ORDER BY created_at DESC",
         )
         rows = await cur.fetchall()
         result = []
         for row in rows:
             item = dict(row)
+            if not item.get("memory_kind"):
+                item["memory_kind"] = "daily" if (
+                    item.get("source_start_ts") and item.get("source_end_ts")
+                    and not str(item.get("source_msg_id") or "").strip()
+                ) else "long_term"
+            item["memory_kind_label"] = "日常" if item["memory_kind"] == "daily" else "长期重要"
             explicit_source = bool(str(item.get("source_msg_id") or "").strip())
             source_ids = _source_ids_for_chatroom_memory(row)
             if explicit_source:
@@ -2093,6 +2343,7 @@ async def trigger_digest(room_id: str, model: str = DEFAULT_MODEL):
 
 @router.post("/rooms/{room_id}/memories")
 async def create_memory(room_id: str, body: MemoryCreate):
+    await _ensure_chatroom_memory_source_column()
     # 确定 scope
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
@@ -2106,12 +2357,14 @@ async def create_memory(room_id: str, body: MemoryCreate):
         content=body.content,
         keywords=body.keywords,
         importance=body.importance,
+        memory_kind="daily" if body.memory_kind == "daily" else "long_term",
     )
     return {"ok": True, "id": mem_id}
 
 
 @router.put("/memories/{mem_id}")
 async def update_memory(mem_id: str, body: MemoryUpdate):
+    await _ensure_chatroom_memory_source_column()
     async with get_db() as db:
         sets, vals = [], []
         if body.content is not None:
@@ -2123,6 +2376,9 @@ async def update_memory(mem_id: str, body: MemoryUpdate):
         if body.importance is not None:
             sets.append("importance=?")
             vals.append(body.importance)
+        if body.memory_kind is not None:
+            sets.append("memory_kind=?")
+            vals.append("daily" if body.memory_kind == "daily" else "long_term")
         if sets:
             vals.append(mem_id)
             await db.execute(f"UPDATE chatroom_memories SET {', '.join(sets)} WHERE id=?", vals)
@@ -2143,7 +2399,6 @@ async def update_memory(mem_id: str, body: MemoryUpdate):
 async def get_memory_source_legacy(mem_id: str):
     """追溯聊天室记忆对应的原始聊天记录（私聊+群聊）"""
     import aiosqlite
-    from config import load_worldbook
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT source_start_ts, source_end_ts FROM chatroom_memories WHERE id=?", (mem_id,))
@@ -2151,10 +2406,7 @@ async def get_memory_source_legacy(mem_id: str):
     if not mem or not mem["source_start_ts"] or not mem["source_end_ts"]:
         return {"ok": False, "message": "该记忆没有可追溯的原文"}
 
-    wb = load_worldbook()
-    user_name = wb.get("user_name", "用户")
-    ai_name = wb.get("ai_name", "AI")
-    connor_name = load_chatroom_config().get("connor_name", "Connor")
+    user_name, ai_name, connor_name = get_chatroom_names()
     start_ts, end_ts = mem["source_start_ts"], mem["source_end_ts"]
 
     async with get_db() as db:

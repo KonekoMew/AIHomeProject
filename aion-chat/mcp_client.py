@@ -94,7 +94,7 @@ class MCPManager:
 
         srv_type = server_cfg.get("type", "http")
 
-        if srv_type == "http":
+        if srv_type in {"http", "streamablehttp", "streamable_http"}:
             return await self._connect_http(server_name, server_cfg)
         elif srv_type == "sse":
             return await self._connect_sse(server_name, server_cfg)
@@ -261,6 +261,43 @@ class MCPManager:
             "enabled": True,
         }
         cfg.setdefault("servers", []).append(new_server)
+        _save_config(cfg)
+        return new_server
+
+    def upsert_server(
+        self,
+        name: str,
+        srv_type: str,
+        url: str,
+        *,
+        headers: dict | None = None,
+        enabled: bool = True,
+        visible: bool = True,
+    ) -> dict:
+        """Create or update an MCP server config."""
+        cfg = _load_config()
+        servers = cfg.setdefault("servers", [])
+        for s in servers:
+            if s.get("name") == name:
+                s.update({
+                    "type": srv_type,
+                    "url": url,
+                    "headers": headers or {},
+                    "enabled": enabled,
+                    "visible": visible,
+                })
+                _save_config(cfg)
+                return s
+
+        new_server = {
+            "name": name,
+            "type": srv_type,
+            "url": url,
+            "headers": headers or {},
+            "enabled": enabled,
+            "visible": visible,
+        }
+        servers.append(new_server)
         _save_config(cfg)
         return new_server
 

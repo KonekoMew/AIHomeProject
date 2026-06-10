@@ -8,8 +8,8 @@
 <link rel="apple-touch-icon" href="/public/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#f0ebe6">
-<link rel="stylesheet" href="/static/chatroom.css">
+<meta name="theme-color" content="#050923">
+<link rel="stylesheet" href="/static/chatroom.css?v=syslog-20260610a">
 </head>
 <body>
   <div class="app">
@@ -29,6 +29,9 @@
         <button onclick="openMemory()">📚 记忆库</button>
       </div>
       <div class="sidebar-mem-btn">
+        <button id="crSysLogBtn" onclick="crOpenSystemLog()">📋 系统日志</button>
+      </div>
+      <div class="sidebar-mem-btn">
         <button onclick="crOpenPersona()">🎭 人设</button>
       </div>
       <div class="sidebar-mem-btn">
@@ -40,10 +43,6 @@
       <div class="sidebar-mem-btn">
         <button onclick="crOpenDiary()">📔 日记本</button>
       </div>
-      <div class="sidebar-footer">
-        <span class="connor-dot" id="connorDot"></span>
-        <span id="connorStatus">检查中...</span>
-      </div>
     </div>
     <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
 
@@ -54,9 +53,9 @@
         <div class="room-title" id="roomTitle">聊天室</div>
         <div class="header-actions" id="headerActions">
           <button class="reply-once-btn aion" id="replyAionBtn" onclick="triggerReplyOnce('aion')" style="display:none">AI 说</button>
-          <button class="reply-once-btn connor" id="replyConnorBtn" onclick="triggerReplyOnce('connor')" style="display:none">Connor 说</button>
+          <button class="reply-once-btn connor" id="replyConnorBtn" onclick="triggerReplyOnce('connor')" style="display:none">第二AI 说</button>
           <button class="ai-chat-btn" id="aiChatBtn" onclick="triggerAiChat()" style="display:none">💬 让他们聊</button>
-          <button id="chatSearchBtn" onclick="openChatSearch()" title="搜索聊天记录">搜索</button>
+          <button id="chatSearchBtn" onclick="openChatSearch()" title="搜索聊天记录" hidden aria-hidden="true">搜索</button>
           <button onclick="openSettings()">⚙️</button>
         </div>
       </div>
@@ -78,6 +77,7 @@
         </div>
       </div>
 
+      <div class="bottom-fade-overlay" aria-hidden="true"></div>
       <div class="preview-area" id="previewArea"></div>
       <form class="composer" id="composer" style="display:none">
         <input type="file" id="fileInput" accept="image/*,audio/*" multiple hidden>
@@ -133,11 +133,11 @@
           </select>
         </div>
         <div class="field" id="fieldAionModel">
-          <label>Aion 模型线路</label>
+          <label>AI 模型线路</label>
           <select id="setAionModel"></select>
         </div>
         <div class="field" id="fieldConnorModel">
-          <label>Connor 模型线路</label>
+          <label>第二AI 模型线路</label>
           <select id="setConnorModel"></select>
         </div>
         <div class="settings-section-compact">
@@ -162,31 +162,62 @@
     </div>
   </div>
 
-  <!-- 人设面板 -->
-  <div class="settings-overlay" id="personaOverlay">
-    <div class="settings-panel">
+  <!-- 人设页面 -->
+  <div class="settings-overlay persona-page-overlay" id="personaOverlay">
+    <div class="persona-page-panel">
       <div class="panel-header">
-        <span>🎭 人设设定</span>
+        <span id="personaPageTitle">🎭 人设设定</span>
         <button class="close-btn" onclick="crClosePersona()">✕</button>
       </div>
-      <div class="panel-body">
-        <div class="field">
-          <label>第二位 AI 名字</label>
-          <input id="personaConnorName" type="text" placeholder="Connor">
-        </div>
-        <div class="field">
-          <label>第二位 AI 人设</label>
-          <textarea id="personaConnorText" rows="10" placeholder="输入第二位 AI 的角色设定..."></textarea>
-        </div>
-        <p style="color:var(--text3);font-size:12px;margin:4px 0 12px;">此人设对所有群聊和私聊房间统一生效。若存在 persona.md 文件，此处填写后将覆盖文件内容。</p>
-        <div class="field" style="margin-top:8px;">
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
-            <input id="personaExtraEnabled" type="checkbox">
-            <span style="font-size:13px;color:var(--text2);">启用补充设定</span>
+      <div class="persona-page-body">
+        <div class="persona-top-grid">
+          <div class="field">
+            <label>名字</label>
+            <input id="personaConnorName" type="text" placeholder="第二AI">
           </div>
-          <textarea id="personaExtraText" rows="5" placeholder="补充设定内容..."></textarea>
+          <div class="persona-evolution-panel">
+            <div class="persona-evolution-head">
+              <div>
+                <div class="persona-evolution-title" id="personaEvolutionTitle">自动复盘</div>
+                <div class="persona-evolution-sub">北京时间 05:00 复盘；只读取该角色自己的点评和记忆库</div>
+              </div>
+              <label class="toggle-switch" title="启用每日复盘">
+                <input type="checkbox" id="personaEvolutionEnabled">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="persona-evolution-controls">
+              <input class="persona-date-input" type="date" id="personaEvolutionDate" title="手动复盘日期">
+              <button type="button" class="persona-small-btn" id="personaEvolutionTestBtn" onclick="crRunPersonaEvolutionTest()">立即复盘</button>
+              <button type="button" class="persona-small-btn" onclick="crOpenPersonaEvolutionHistory()">查看记录</button>
+            </div>
+            <div class="persona-evolution-latest" id="personaEvolutionLatest">最近复盘：暂无记录</div>
+          </div>
         </div>
-        <button class="save-btn" onclick="crSavePersona()">保存</button>
+        <div class="persona-section-grid" id="personaSections"></div>
+        <details class="persona-extra-section">
+          <summary>
+            <span>补充设定</span>
+            <label class="persona-extra-toggle" onclick="event.stopPropagation()">
+              <input id="personaExtraEnabled" type="checkbox">
+              <span>启用</span>
+            </label>
+          </summary>
+          <textarea id="personaExtraText" rows="5" placeholder="补充设定内容..."></textarea>
+        </details>
+      </div>
+      <div class="persona-page-actions">
+        <button type="button" class="persona-cancel-btn" onclick="crClosePersona()">取消</button>
+        <button type="button" class="persona-save-btn" onclick="crSavePersona()">保存</button>
+      </div>
+    </div>
+    <div class="persona-history-modal" id="personaEvolutionModal" aria-hidden="true" onclick="crOnPersonaEvolutionBackdrop(event)">
+      <div class="persona-history-dialog" onclick="event.stopPropagation()">
+        <div class="persona-history-head">
+          <span id="personaEvolutionHistoryTitle">自动复盘记录</span>
+          <button class="close-btn" onclick="crClosePersonaEvolutionHistory()">✕</button>
+        </div>
+        <div class="persona-history-body" id="personaEvolutionRuns"></div>
       </div>
     </div>
   </div>
@@ -201,8 +232,10 @@
       <div class="panel-body">
         <div style="display:flex; gap:6px; margin-bottom:12px;">
           <button class="mem-add-btn" style="flex:1;" onclick="showAddMemory()">+ 手动添加</button>
+          <button class="mem-add-btn" id="chatroomCompressDailyBtn" style="flex:1; background:#6a4c93;" onclick="compressChatroomDailyMemories()">🗜️ 压缩日常</button>
           <button class="mem-add-btn" style="flex:1; background:var(--text3);" onclick="triggerDigest()">📝 总结记忆</button>
         </div>
+        <div class="chatroom-compress-review" id="chatroomCompressReview" style="display:none"></div>
         <!-- 添加/编辑表单 -->
         <div id="memForm" style="display:none; margin-bottom:12px; padding:10px; background:var(--bg); border-radius:8px;">
           <input type="hidden" id="memEditId">
@@ -211,6 +244,13 @@
             <textarea id="memContent" rows="3" placeholder="记忆内容..."></textarea>
           </div>
           <div style="display:flex; gap:8px; margin-bottom:8px;">
+            <div class="field" style="width:96px; margin-bottom:0;">
+              <label>记忆标签</label>
+              <select id="memKind">
+                <option value="long_term">长期重要</option>
+                <option value="daily">日常</option>
+              </select>
+            </div>
             <div class="field" style="flex:1; margin-bottom:0;">
               <label>关键词</label>
               <input id="memKeywords" type="text" placeholder="逗号分隔">
@@ -295,6 +335,20 @@
     </div>
   </div>
 
+  <div class="cr-syslog-overlay" id="crSysLogModal" onclick="if(event.target===this)crCloseSystemLog()">
+    <div class="cr-syslog-modal" onclick="event.stopPropagation()">
+      <h3>📋 系统日志</h3>
+      <div class="cr-syslog-count" id="crSysLogCount">共 0 条（刷新后清空）</div>
+      <div class="cr-syslog-list" id="crSysLogList">
+        <div class="cr-syslog-empty">暂无日志</div>
+      </div>
+      <div class="cr-syslog-actions">
+        <button class="transfer-btn-cancel" onclick="crClearSystemLog()">清空</button>
+        <button class="transfer-btn-cancel" onclick="crCloseSystemLog()">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 转账弹窗 -->
   <div class="cr-transfer-dialog-overlay" id="crTransferDialogOverlay" onclick="crCloseTransferDialog()">
     <div class="cr-transfer-dialog" onclick="event.stopPropagation()">
@@ -331,6 +385,6 @@
     </div>
   </div>
 
-  <script src="/static/chatroom.js"></script>
+  <script src="/static/chatroom.js?v=syslog-20260610a"></script>
 </body>
 </html>

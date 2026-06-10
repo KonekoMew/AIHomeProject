@@ -13,6 +13,7 @@ from camera import cam, CAM_CHECK_CMD
 from database import get_db
 from activity import is_activity_tracking_enabled
 from schedule import get_active_schedules, build_schedule_prompt
+from luckin import LUCKIN_CMD_PATTERN, luckin_ability_text
 from memory import (
     instant_digest, recall_memories, build_surfacing_memories,
     fetch_source_details,
@@ -42,7 +43,7 @@ _ALL_CMD_PATTERNS = [
     MUSIC_CMD_PATTERN, MOMENT_CMD_PATTERN, MEMORY_CMD_PATTERN,
     ACTIVITY_CHECK_PATTERN, SELFIE_CMD_PATTERN, DRAW_CMD_PATTERN,
     POI_SEARCH_PATTERN, TOY_CMD_PATTERN, PET_CMD_PATTERN,
-    HOME_CMD_PATTERN, TRANSFER_CMD_PATTERN, PRIVATE_WHISPER_CMD_PATTERN,
+    HOME_CMD_PATTERN, LUCKIN_CMD_PATTERN, TRANSFER_CMD_PATTERN, PRIVATE_WHISPER_CMD_PATTERN,
 ]
 
 HOME_ALIASES_HINT = (
@@ -106,10 +107,10 @@ def _timeline_display_names() -> tuple[str, str, str]:
     wb = load_worldbook()
     user_name = wb.get("user_name") or "用户"
     ai_name = wb.get("ai_name") or "AI"
-    connor_name = "Connor"
+    connor_name = "AI"
     try:
         from chatroom import load_chatroom_config
-        connor_name = load_chatroom_config().get("connor_name") or "Connor"
+        connor_name = load_chatroom_config().get("connor_name") or "AI"
     except Exception:
         pass
     return user_name, ai_name, connor_name
@@ -120,10 +121,14 @@ async def build_health_summary() -> str:
     if not SETTINGS.get("health_share_enabled"):
         return ""
     try:
+        from health_context import category_label, classify_heart_rate, get_heart_config
+
+        heart_cfg = None
         async with get_db() as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT * FROM health_ring_latest WHERE id=1")
             ring = await cur.fetchone()
+            heart_cfg = await get_heart_config(db)
             cur = await db.execute(
                 "SELECT weight_kg FROM health_weight_entries ORDER BY date DESC LIMIT 1"
             )
@@ -136,11 +141,22 @@ async def build_health_summary() -> str:
         parts = []
         if ring:
             hr = ring["heart_rate"]
+            measured_at = ring["measured_at"]
             sys_bp = ring["systolic_bp"]
             dia_bp = ring["diastolic_bp"]
             spo2 = ring["spo2"]
             hrv = ring["hrv"]
-            if hr: parts.append(f"心率:{hr}")
+            if hr:
+                try:
+                    age_seconds = time.time() - float(measured_at or 0)
+                    stale_minutes = int((heart_cfg or {}).get("stale_minutes") or 30)
+                    if measured_at and age_seconds <= stale_minutes * 60:
+                        cat = category_label(classify_heart_rate(int(hr), heart_cfg))
+                        parts.append(f"心率:{hr}({cat})")
+                    else:
+                        parts.append(f"心率:{hr}(数据过期，可能未佩戴/没电/未同步)")
+                except Exception:
+                    parts.append(f"心率:{hr}")
             if sys_bp and dia_bp: parts.append(f"血压:{sys_bp}/{dia_bp}")
             if spo2: parts.append(f"血氧:{spo2}")
             if hrv: parts.append(f"HRV:{hrv}")
@@ -213,6 +229,9 @@ async def build_ability_block(
     )
     abilities.append("[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。")
     abilities.append(HOME_ABILITY_TEXT)
+    luckin_text = luckin_ability_text()
+    if luckin_text:
+        abilities.append(luckin_text)
 
     if include_private_whisper:
         abilities.append(
@@ -316,6 +335,26 @@ async def build_ability_block(
     return block
 
 
+def _memory_debug_item(mem: dict, max_content: int = 200) -> dict:
+    if not isinstance(mem, dict):
+        return {}
+
+    def _number(value, default=0.0):
+        try:
+            return round(float(value), 4)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "content": str(mem.get("content") or "")[:max_content],
+        "type": str(mem.get("type") or mem.get("scope") or mem.get("memory_kind") or ""),
+        "score": _number(mem.get("score")),
+        "vec_sim": _number(mem.get("vec_sim")),
+        "kw_score": _number(mem.get("kw_score")),
+        "importance": _number(mem.get("importance"), 0.5),
+    }
+
+
 async def build_memory_blocks(
     query_text: str,
     recent_messages: list[dict] = None,
@@ -326,6 +365,7 @@ async def build_memory_blocks(
     chatroom_source_fn=None,
     skip_digest: bool = False,
     digest_result: dict = None,
+    always_include_recalled: bool = False,
 ) -> dict:
     """
     执行 instant_digest + 记忆召回，返回注入用的文本块和调试信息。
@@ -339,6 +379,7 @@ async def build_memory_blocks(
       chatroom_source_fn: 可选的聊天室原文追溯函数 async (memories, keywords) -> str
       skip_digest: 跳过 instant_digest（快速模式）
       digest_result: 外部传入的 digest 结果（复用同一次调用）
+      always_include_recalled: 是否每轮都注入最高相关的摘要记忆；原文细节仍由 require_detail 控制
 
     返回 dict:
       time_block: str — 当前时间 + 背景记忆文本
@@ -421,9 +462,9 @@ async def build_memory_blocks(
         mem_text = "\n".join(unresolved_lines + normal_lines)
         time_block += f"\n\n[背景记忆]\n以下是你记得的近期事件和需要关注的事项，在对话中如果有关联可以自然提起：\n{mem_text}"
 
-    # RAG 精确召回
+    # RAG 摘要召回；always_include_recalled 用于 Connor 侧每轮至少带摘要记忆。
     recalled = []
-    if is_search_needed and recall_query:
+    if recall_query and (is_search_needed or always_include_recalled):
         # 主记忆库
         if main_candidates:
             recalled = [r for r in main_candidates if r["score"] >= 0.45 and r["id"] not in surfaced_ids][:5]
@@ -452,10 +493,27 @@ async def build_memory_blocks(
             if detail_text:
                 memory_block += f"\n\n[原文细节]\n以下是相关的具体对话记录：\n{detail_text}"
 
+    debug_candidates = []
+    seen_debug = set()
+    for mem in list(main_candidates or []) + list(chatroom_mems or []):
+        key = mem.get("id") or str(mem.get("content", ""))[:100]
+        if key in seen_debug:
+            continue
+        seen_debug.add(key)
+        debug_candidates.append(mem)
+    debug_candidates.sort(key=lambda m: float(m.get("score") or 0.0), reverse=True)
+
+    debug_digest = dict(digest_result or {})
+    debug_digest.update({
+        "recall_query": recall_query,
+        "recalled_memories": [_memory_debug_item(m, 200) for m in recalled],
+        "debug_top6": [_memory_debug_item(m, 100) for m in debug_candidates[:6]],
+    })
+
     return {
         "time_block": time_block,
         "memory_block": memory_block,
-        "digest_result": digest_result,
+        "digest_result": debug_digest,
     }
 
 
@@ -503,6 +561,8 @@ async def fetch_merged_timeline(
         按 created_at 升序排列的消息列表，每条包含:
         source ("private"/"group"), sender, content, created_at, attachments
     """
+    # Keep conv_id/room_id for caller compatibility. Context is intentionally
+    # resolved across all relevant windows, then trimmed by global recency.
     results = []
 
     async with get_db() as db:
@@ -510,64 +570,45 @@ async def fetch_merged_timeline(
 
         # ── 私聊消息 ──
         if who == "aion":
-            if not conv_id:
-                cur = await db.execute(
-                    "SELECT id FROM conversations ORDER BY updated_at DESC LIMIT 1"
-                )
-                row = await cur.fetchone()
-                if row:
-                    conv_id = row["id"]
-            if conv_id:
-                cur = await db.execute(
-                    "SELECT role AS sender, content, created_at, attachments "
-                    "FROM messages "
-                    "WHERE conv_id=? AND role IN ('user','assistant','system') "
-                    "ORDER BY created_at DESC LIMIT ?",
-                    (conv_id, limit),
-                )
-                for r in await cur.fetchall():
-                    d = dict(r)
-                    d["source"] = "private"
-                    results.append(d)
-
-        elif who == "connor":
             cur = await db.execute(
-                "SELECT id FROM chatroom_rooms "
-                "WHERE type = 'connor_1v1' ORDER BY updated_at DESC LIMIT 1"
-            )
-            connor_room = await cur.fetchone()
-            if connor_room:
-                cur = await db.execute(
-                    "SELECT sender, content, created_at, attachments "
-                    "FROM chatroom_messages WHERE room_id=? "
-                    "ORDER BY created_at DESC LIMIT ?",
-                    (connor_room["id"], limit),
-                )
-                for r in await cur.fetchall():
-                    d = dict(r)
-                    d["source"] = "private"
-                    results.append(d)
-
-        # ── 群聊消息 ──
-        if not room_id:
-            cur = await db.execute(
-                "SELECT id FROM chatroom_rooms "
-                "WHERE type = 'group' ORDER BY updated_at DESC LIMIT 1"
-            )
-            row = await cur.fetchone()
-            if row:
-                room_id = row["id"]
-        if room_id:
-            cur = await db.execute(
-                "SELECT sender, content, created_at, attachments "
-                "FROM chatroom_messages WHERE room_id=? "
+                "SELECT role AS sender, content, created_at, attachments "
+                "FROM messages "
+                "WHERE role IN ('user','assistant','system') "
                 "ORDER BY created_at DESC LIMIT ?",
-                (room_id, limit),
+                (limit,),
             )
             for r in await cur.fetchall():
                 d = dict(r)
-                d["source"] = "group"
+                d["source"] = "private"
                 results.append(d)
+
+        elif who == "connor":
+            cur = await db.execute(
+                "SELECT m.sender, m.content, m.created_at, m.attachments "
+                "FROM chatroom_messages m "
+                "JOIN chatroom_rooms r ON r.id = m.room_id "
+                "WHERE r.type = 'connor_1v1' "
+                "ORDER BY m.created_at DESC LIMIT ?",
+                (limit,),
+            )
+            for r in await cur.fetchall():
+                d = dict(r)
+                d["source"] = "private"
+                results.append(d)
+
+        # ── 群聊消息 ──
+        cur = await db.execute(
+            "SELECT m.sender, m.content, m.created_at, m.attachments "
+            "FROM chatroom_messages m "
+            "JOIN chatroom_rooms r ON r.id = m.room_id "
+            "WHERE r.type = 'group' "
+            "ORDER BY m.created_at DESC LIMIT ?",
+            (limit,),
+        )
+        for r in await cur.fetchall():
+            d = dict(r)
+            d["source"] = "group"
+            results.append(d)
 
     # 按时间升序，取最近 N 条
     results.sort(key=lambda x: x["created_at"])

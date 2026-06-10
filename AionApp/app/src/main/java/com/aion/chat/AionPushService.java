@@ -7,6 +7,19 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothGatt;
+import android.bluetooth.BluetoothGattCallback;
+import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;
+import android.bluetooth.BluetoothGattService;
+import android.bluetooth.BluetoothManager;
+import android.bluetooth.BluetoothProfile;
+import android.bluetooth.le.BluetoothLeScanner;
+import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.ScanRecord;
+import android.bluetooth.le.ScanResult;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -36,7 +49,9 @@ import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
 
+import java.util.ArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -82,6 +97,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.Calendar;
 import java.util.Locale;
+import java.util.UUID;
 
 /**
  * 前台服务 — OkHttp WebSocket 长连接
@@ -143,6 +159,12 @@ public class AionPushService extends Service {
     private LocationManager locationManager;
     private volatile Location lastKnownLocation;
     private volatile boolean locationEnabled = false;  // 服务端定位开关状态
+
+    // ── 戒指心率后台同步 ──
+    private static final long RING_SYNC_INTERVAL = 10 * 60_000L;
+    private static final int RING_SYNC_OFFSET_MINUTE = 2; // 戒指整 10 分钟测量后，错后 2 分钟拉取
+    private Thread ringSyncThread;
+    private RingBackgroundSync ringBackgroundSync;
 
     // ── 活动上报 ──
     private static final long ACTIVITY_INTERVAL = 60_000;  // 60秒检测一次前台应用
@@ -290,6 +312,7 @@ public class AionPushService extends Service {
         startHeartbeatThread();
         startLocationThread();
         startActivityThread();
+        startRingSyncThread();
         return START_STICKY;
     }
 
@@ -304,6 +327,8 @@ public class AionPushService extends Service {
         if (heartbeatThread != null) heartbeatThread.interrupt();
         if (locationThread != null) locationThread.interrupt();
         if (activityThread != null) activityThread.interrupt();
+        if (ringSyncThread != null) ringSyncThread.interrupt();
+        if (ringBackgroundSync != null) ringBackgroundSync.close();
         stopEsp32Bridge();
         stopPhoneScreenProjection();
         unregisterScreenReceiver();
@@ -586,6 +611,644 @@ public class AionPushService extends Service {
         }
     }
 
+    private synchronized void startRingSyncThread() {
+        if (ringSyncThread != null && ringSyncThread.isAlive()) return;
+        ringSyncThread = new Thread(() -> {
+            Log.i(TAG, "💍 Ring sync thread started");
+            while (shouldRun) {
+                long delay = computeNextRingSyncDelayMs();
+                Log.i(TAG, "💍 next background ring sync in " + (delay / 1000) + "s");
+                try { Thread.sleep(delay); }
+                catch (InterruptedException e) { break; }
+                if (!shouldRun) break;
+                try {
+                    if (ringBackgroundSync == null) {
+                        ringBackgroundSync = new RingBackgroundSync();
+                    }
+                    ringBackgroundSync.syncHeartHistoryOnce();
+                } catch (Exception e) {
+                    Log.e(TAG, "💍 sync failed: " + e.getMessage());
+                    if (ringBackgroundSync != null) {
+                        ringBackgroundSync.close();
+                        ringBackgroundSync = null;
+                    }
+                }
+            }
+            if (ringBackgroundSync != null) {
+                ringBackgroundSync.close();
+                ringBackgroundSync = null;
+            }
+            Log.i(TAG, "💍 Ring sync thread exiting");
+        }, "AionRingSync");
+        ringSyncThread.setDaemon(false);
+        ringSyncThread.start();
+    }
+
+    private long computeNextRingSyncDelayMs() {
+        Calendar cal = Calendar.getInstance();
+        cal.set(Calendar.SECOND, 0);
+        cal.set(Calendar.MILLISECOND, 0);
+        int minute = cal.get(Calendar.MINUTE);
+        int targetMinute = (minute / 10) * 10 + RING_SYNC_OFFSET_MINUTE;
+        if (minute > targetMinute || (minute == targetMinute && Calendar.getInstance().get(Calendar.SECOND) > 0)) {
+            targetMinute += 10;
+        }
+        if (targetMinute >= 60) {
+            cal.add(Calendar.HOUR_OF_DAY, 1);
+            targetMinute -= 60;
+        }
+        cal.set(Calendar.MINUTE, targetMinute);
+        long delay = cal.getTimeInMillis() - System.currentTimeMillis();
+        if (delay <= 0) delay += RING_SYNC_INTERVAL;
+        if (delay < 1000) delay = 1000;
+        return delay;
+    }
+
+    private class RingBackgroundSync {
+        private static final String PREFS_NAME = "aion_ring_ble";
+        private static final String KEY_DEVICE_ADDRESS = "device_address";
+        private static final String KEY_DEVICE_NAME = "device_name";
+        private static final String KEY_LAST_HEART_MEASURED_AT = "bg_last_heart_measured_at";
+        private static final int DT_SETTING_TIME = 0x0100;
+        private static final int DT_SETTING_HEART_MONITOR = 0x010C;
+        private static final int DT_HEALTH_HEART = 0x0506;
+        private static final int DT_HEALTH_HEART_ACK = 0x0515;
+        private static final int DT_HEALTH_BLOCK = 0x0580;
+        private static final int HEART_MONITOR_INTERVAL_MIN = 10;
+
+        private final UUID cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
+        private final RingBleService[] services = new RingBleService[] {
+                new RingBleService("be940000-7333-be46-b7ae-689e71722bd5", "be940001-7333-be46-b7ae-689e71722bd5", "be940003-7333-be46-b7ae-689e71722bd5", "Main"),
+                new RingBleService("6e400001-b5a3-f393-e0a9-e50e24dcca9e", "6e400002-b5a3-f393-e0a9-e50e24dcca9e", "6e400003-b5a3-f393-e0a9-e50e24dcca9e", "UART"),
+                new RingBleService("0000ae00-0000-1000-8000-00805f9b34fb", "0000ae01-0000-1000-8000-00805f9b34fb", "0000ae02-0000-1000-8000-00805f9b34fb", "JieLi")
+        };
+
+        private BluetoothAdapter adapter;
+        private BluetoothLeScanner scanner;
+        private BluetoothGatt gatt;
+        private BluetoothGattCharacteristic writeChar;
+        private BluetoothDevice currentDevice;
+        private CountDownLatch connectLatch;
+        private CountDownLatch writeLatch;
+        private CountDownLatch heartLatch;
+        private final Object payloadLock = new Object();
+        private final ArrayList<byte[]> heartPayloads = new ArrayList<>();
+        private byte[] reassemblyData;
+        private volatile boolean connected = false;
+        private volatile boolean heartDone = false;
+        private volatile BluetoothDevice scanMatch;
+        private volatile CountDownLatch scanLatch;
+        private String deviceName = "";
+
+        RingBackgroundSync() {
+            BluetoothManager bm = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+            if (bm != null) adapter = bm.getAdapter();
+        }
+
+        void syncHeartHistoryOnce() {
+            String httpBase = getHttpBase();
+            if (httpBase == null) {
+                Log.d(TAG, "💍 no server url yet");
+                return;
+            }
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            String savedAddress = prefs.getString(KEY_DEVICE_ADDRESS, "");
+            String savedName = prefs.getString(KEY_DEVICE_NAME, "");
+            if ((savedAddress == null || savedAddress.isEmpty()) && (savedName == null || savedName.isEmpty())) {
+                Log.d(TAG, "💍 no saved ring device");
+                postRingDiag(httpBase, "no_saved_device", "没有保存过戒指设备，后台无法自动同步", 0, 0, 0);
+                return;
+            }
+            if (!hasBluetoothPermissionsForRing()) {
+                Log.w(TAG, "💍 bluetooth permissions missing");
+                postRingDiag(httpBase, "bluetooth_permission_missing", "蓝牙权限缺失，后台无法连接戒指", 0, 0, 0);
+                return;
+            }
+            BluetoothDevice device = resolveSavedDevice(savedAddress, savedName);
+            if (device == null) {
+                Log.w(TAG, "💍 saved ring not found");
+                postRingDiag(httpBase, "ring_not_found", "没有扫描到已保存戒指 savedName=" + savedName, 0, 0, 0);
+                return;
+            }
+            try {
+                connect(device);
+                syncTimeAndMonitorSetting();
+                ArrayList<HeartRateRecord> records = requestHeartHistory();
+                if (records.isEmpty()) {
+                    Log.i(TAG, "💍 no heart history records");
+                    postRingDiag(httpBase, "no_records", "已连接戒指，但本次没有读到新的心率历史", 0, 0, 0);
+                    return;
+                }
+                long lastUploaded = prefs.getLong(KEY_LAST_HEART_MEASURED_AT, 0);
+                long newestUploaded = lastUploaded;
+                int uploaded = 0;
+                double newestMeasuredAt = 0;
+                for (HeartRateRecord record : records) {
+                    if (record.heartRate < 20 || record.heartRate > 240) continue;
+                    long measuredMs = Math.round(record.measuredAt * 1000.0);
+                    if (record.measuredAt > newestMeasuredAt) newestMeasuredAt = record.measuredAt;
+                    if (measuredMs <= lastUploaded) continue;
+                    if (postHeartRate(httpBase, record)) {
+                        uploaded++;
+                        if (measuredMs > newestUploaded) newestUploaded = measuredMs;
+                    }
+                }
+                if (newestUploaded > lastUploaded) {
+                    prefs.edit().putLong(KEY_LAST_HEART_MEASURED_AT, newestUploaded).apply();
+                }
+                Log.i(TAG, "💍 heart history synced, total=" + records.size() + ", uploaded=" + uploaded);
+                postRingDiag(
+                        httpBase,
+                        uploaded > 0 ? "ok" : "no_new_records",
+                        "后台心率同步完成 total=" + records.size() + ", uploaded=" + uploaded
+                                + ", lastUploadedMs=" + lastUploaded,
+                        records.size(),
+                        uploaded,
+                        newestMeasuredAt
+                );
+            } catch (Exception e) {
+                postRingDiag(httpBase, "sync_failed", "后台心率同步失败：" + e.getMessage(), 0, 0, 0);
+                throw e;
+            } finally {
+                close();
+            }
+        }
+
+        private BluetoothDevice resolveSavedDevice(String savedAddress, String savedName) {
+            if (adapter == null || !adapter.isEnabled()) return null;
+            if (savedAddress != null && !savedAddress.isEmpty()) {
+                try {
+                    return adapter.getRemoteDevice(savedAddress);
+                } catch (Exception e) {
+                    Log.w(TAG, "💍 saved address invalid: " + e.getMessage());
+                }
+            }
+            scanner = adapter.getBluetoothLeScanner();
+            if (scanner == null) return null;
+            scanMatch = null;
+            scanLatch = new CountDownLatch(1);
+            try {
+                scanner.startScan(scanCallback);
+                scanLatch.await(12, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                Log.w(TAG, "💍 scan failed: " + e.getMessage());
+            } finally {
+                try { scanner.stopScan(scanCallback); } catch (Exception ignored) {}
+            }
+            return scanMatch;
+        }
+
+        private final ScanCallback scanCallback = new ScanCallback() {
+            @Override
+            public void onScanResult(int callbackType, ScanResult result) {
+                BluetoothDevice dev = result.getDevice();
+                String name = getDeviceName(dev);
+                SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+                String savedName = prefs.getString(KEY_DEVICE_NAME, "");
+                boolean matched = savedName != null && !savedName.isEmpty() && savedName.equals(name);
+                if (!matched) matched = looksLikeRing(result, name);
+                if (!matched) return;
+                scanMatch = dev;
+                CountDownLatch latch = scanLatch;
+                if (latch != null) latch.countDown();
+            }
+        };
+
+        private void connect(BluetoothDevice device) {
+            close();
+            currentDevice = device;
+            deviceName = getDeviceName(device);
+            connectLatch = new CountDownLatch(1);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                gatt = device.connectGatt(AionPushService.this, false, gattCallback, BluetoothDevice.TRANSPORT_LE);
+            } else {
+                gatt = device.connectGatt(AionPushService.this, false, gattCallback);
+            }
+            try {
+                if (!connectLatch.await(20, TimeUnit.SECONDS) || !connected || writeChar == null) {
+                    throw new IllegalStateException("ring connect timeout");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("ring connect interrupted");
+            }
+            try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+
+        private final BluetoothGattCallback gattCallback = new BluetoothGattCallback() {
+            @Override
+            public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    connected = false;
+                    CountDownLatch latch = connectLatch;
+                    if (latch != null) latch.countDown();
+                    return;
+                }
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    try { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH); } catch (Exception ignored) {}
+                    mainHandler.postDelayed(g::discoverServices, 700);
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    connected = false;
+                }
+            }
+
+            @Override
+            public void onServicesDiscovered(BluetoothGatt g, int status) {
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    CountDownLatch latch = connectLatch;
+                    if (latch != null) latch.countDown();
+                    return;
+                }
+                setupRingService(g);
+            }
+
+            @Override
+            public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c) {
+                processIncoming(c.getValue());
+            }
+
+            @Override
+            public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic c, byte[] value) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    processIncoming(value);
+                }
+            }
+
+            @Override
+            public void onCharacteristicWrite(BluetoothGatt g, BluetoothGattCharacteristic c, int status) {
+                CountDownLatch latch = writeLatch;
+                if (latch != null) latch.countDown();
+            }
+
+            @Override
+            public void onDescriptorWrite(BluetoothGatt g, BluetoothGattDescriptor d, int status) {
+                connected = true;
+                CountDownLatch latch = connectLatch;
+                if (latch != null) latch.countDown();
+            }
+        };
+
+        private void setupRingService(BluetoothGatt g) {
+            BluetoothGattService matchedService = null;
+            RingBleService matched = null;
+            for (RingBleService svc : services) {
+                matchedService = g.getService(svc.service);
+                if (matchedService != null) {
+                    matched = svc;
+                    break;
+                }
+            }
+            if (matchedService == null || matched == null) {
+                CountDownLatch latch = connectLatch;
+                if (latch != null) latch.countDown();
+                return;
+            }
+            writeChar = matchedService.getCharacteristic(matched.write);
+            BluetoothGattCharacteristic notifyChar = matchedService.getCharacteristic(matched.notify);
+            if (writeChar == null || notifyChar == null) {
+                CountDownLatch latch = connectLatch;
+                if (latch != null) latch.countDown();
+                return;
+            }
+            if ((writeChar.getProperties() & BluetoothGattCharacteristic.PROPERTY_WRITE) != 0) {
+                writeChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+            } else {
+                writeChar.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE);
+            }
+            enableNotify(g, notifyChar);
+            Log.i(TAG, "💍 background ring service ready: " + matched.name);
+        }
+
+        @SuppressWarnings("deprecation")
+        private void enableNotify(BluetoothGatt g, BluetoothGattCharacteristic ch) {
+            try {
+                g.setCharacteristicNotification(ch, true);
+                BluetoothGattDescriptor desc = ch.getDescriptor(cccdUuid);
+                if (desc == null) {
+                    connected = true;
+                    CountDownLatch latch = connectLatch;
+                    if (latch != null) latch.countDown();
+                    return;
+                }
+                byte[] value = (ch.getProperties() & BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+                        ? BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+                        : BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    int result = g.writeDescriptor(desc, value);
+                    if (result != android.bluetooth.BluetoothStatusCodes.SUCCESS) {
+                        CountDownLatch latch = connectLatch;
+                        if (latch != null) latch.countDown();
+                    }
+                } else {
+                    desc.setValue(value);
+                    if (!g.writeDescriptor(desc)) {
+                        CountDownLatch latch = connectLatch;
+                        if (latch != null) latch.countDown();
+                    }
+                }
+            } catch (Exception e) {
+                CountDownLatch latch = connectLatch;
+                if (latch != null) latch.countDown();
+            }
+        }
+
+        private void syncTimeAndMonitorSetting() {
+            Calendar now = Calendar.getInstance();
+            int dow = now.get(Calendar.DAY_OF_WEEK) - Calendar.MONDAY;
+            if (dow < 0) dow = 6;
+            byte[] timePayload = new byte[] {
+                    (byte) (now.get(Calendar.YEAR) & 0xFF),
+                    (byte) ((now.get(Calendar.YEAR) >> 8) & 0xFF),
+                    (byte) (now.get(Calendar.MONTH) + 1),
+                    (byte) now.get(Calendar.DAY_OF_MONTH),
+                    (byte) now.get(Calendar.HOUR_OF_DAY),
+                    (byte) now.get(Calendar.MINUTE),
+                    (byte) now.get(Calendar.SECOND),
+                    (byte) dow
+            };
+            writePacket(DT_SETTING_TIME, timePayload);
+            sleepQuiet(350);
+            writePacket(DT_SETTING_HEART_MONITOR, new byte[] {1, HEART_MONITOR_INTERVAL_MIN});
+            sleepQuiet(350);
+        }
+
+        private ArrayList<HeartRateRecord> requestHeartHistory() {
+            synchronized (payloadLock) {
+                heartPayloads.clear();
+                reassemblyData = null;
+                heartDone = false;
+            }
+            heartLatch = new CountDownLatch(1);
+            writePacket(DT_HEALTH_HEART, new byte[0]);
+            try { heartLatch.await(35, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            return parseHeartPayloads();
+        }
+
+        private void processIncoming(byte[] raw) {
+            if (raw == null || raw.length < 4) return;
+            byte[] packet;
+            byte[] rest = null;
+            synchronized (payloadLock) {
+                if (reassemblyData != null) {
+                    byte[] combined = new byte[reassemblyData.length + raw.length];
+                    System.arraycopy(reassemblyData, 0, combined, 0, reassemblyData.length);
+                    System.arraycopy(raw, 0, combined, reassemblyData.length, raw.length);
+                    raw = combined;
+                    reassemblyData = null;
+                }
+                int declaredLen = ((raw[2] & 0xFF) | ((raw[3] & 0xFF) << 8));
+                if (declaredLen <= 0 || raw.length < declaredLen) {
+                    reassemblyData = raw;
+                    return;
+                }
+                packet = new byte[declaredLen];
+                System.arraycopy(raw, 0, packet, 0, declaredLen);
+                if (raw.length > declaredLen) {
+                    rest = new byte[raw.length - declaredLen];
+                    System.arraycopy(raw, declaredLen, rest, 0, rest.length);
+                }
+            }
+            processPacket(packet);
+            if (rest != null) processIncoming(rest);
+        }
+
+        private void processPacket(byte[] pkt) {
+            if (pkt.length < 6) return;
+            int dataType = ((pkt[0] & 0xFF) << 8) | (pkt[1] & 0xFF);
+            int totalLen = (pkt[2] & 0xFF) | ((pkt[3] & 0xFF) << 8);
+            int payloadLen = totalLen - 6;
+            if (payloadLen < 0 || pkt.length < totalLen) return;
+            byte[] payload = new byte[payloadLen];
+            if (payloadLen > 0) System.arraycopy(pkt, 4, payload, 0, payloadLen);
+            if (dataType == DT_HEALTH_HEART) {
+                if (payload.length >= 2) {
+                    int count = (payload[0] & 0xFF) | ((payload[1] & 0xFF) << 8);
+                    if (count == 0) finishHeartHistory();
+                }
+                return;
+            }
+            if (dataType == DT_HEALTH_HEART_ACK) {
+                if (payload.length == 0) {
+                    finishHeartHistory();
+                } else {
+                    synchronized (payloadLock) { heartPayloads.add(payload); }
+                }
+                return;
+            }
+            if (dataType == DT_HEALTH_BLOCK) finishHeartHistory();
+        }
+
+        private void finishHeartHistory() {
+            if (heartDone) return;
+            heartDone = true;
+            CountDownLatch latch = heartLatch;
+            if (latch != null) latch.countDown();
+        }
+
+        private ArrayList<HeartRateRecord> parseHeartPayloads() {
+            ArrayList<HeartRateRecord> records = new ArrayList<>();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            synchronized (payloadLock) {
+                for (byte[] p : heartPayloads) out.write(p, 0, p.length);
+            }
+            byte[] payload = out.toByteArray();
+            double offset = localEpoch2000Seconds();
+            for (int i = 0; i + 6 <= payload.length; i += 6) {
+                long ts = readU32LE(payload, i);
+                int mode = payload[i + 4] & 0xFF;
+                int hr = payload[i + 5] & 0xFF;
+                records.add(new HeartRateRecord(offset + ts, hr, mode));
+            }
+            return records;
+        }
+
+        private boolean postHeartRate(String httpBase, HeartRateRecord record) {
+            try {
+                JSONObject raw = new JSONObject();
+                raw.put("source", "android-background-history");
+                raw.put("mode", record.mode);
+                JSONObject body = new JSONObject();
+                body.put("device_name", deviceName);
+                body.put("heart_rate", record.heartRate);
+                body.put("measured_at", record.measuredAt);
+                body.put("source", "android-background-history");
+                body.put("raw", raw);
+                MediaType JSON = MediaType.get("application/json; charset=utf-8");
+                RequestBody reqBody = RequestBody.create(body.toString(), JSON);
+                Request req = new Request.Builder()
+                        .url(httpBase + "/api/health/ring/heart-rate")
+                        .post(reqBody)
+                        .build();
+                try (Response resp = client.newCall(req).execute()) {
+                    Log.i(TAG, "💍 posted heart " + record.heartRate + " bpm → " + resp.code());
+                    return resp.isSuccessful();
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "💍 post heart failed: " + e.getMessage());
+                return false;
+            }
+        }
+
+        private void postRingDiag(String httpBase, String status, String message, int total, int uploaded, double latestMeasuredAt) {
+            if (httpBase == null) return;
+            try {
+                JSONObject body = new JSONObject();
+                body.put("status", status);
+                body.put("info", message
+                        + "; total=" + total
+                        + "; uploaded=" + uploaded
+                        + "; latestMeasuredAt=" + latestMeasuredAt
+                        + "; device=" + deviceName);
+                MediaType JSON = MediaType.get("application/json; charset=utf-8");
+                RequestBody reqBody = RequestBody.create(body.toString(), JSON);
+                Request req = new Request.Builder()
+                        .url(httpBase + "/api/health/ring/diag-report")
+                        .post(reqBody)
+                        .build();
+                try (Response resp = client.newCall(req).execute()) {
+                    Log.i(TAG, "💍 diag posted " + status + " → " + resp.code());
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "💍 diag post failed: " + e.getMessage());
+            }
+        }
+
+        @SuppressWarnings("deprecation")
+        private void writePacket(int dataType, byte[] payload) {
+            if (gatt == null || writeChar == null) throw new IllegalStateException("ring not connected");
+            byte[] pkt = buildPacket(dataType, payload);
+            writeLatch = new CountDownLatch(1);
+            boolean ok;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                int result = gatt.writeCharacteristic(writeChar, pkt, writeChar.getWriteType());
+                ok = result == android.bluetooth.BluetoothStatusCodes.SUCCESS;
+            } else {
+                writeChar.setValue(pkt);
+                ok = gatt.writeCharacteristic(writeChar);
+            }
+            if (!ok) throw new IllegalStateException("write failed 0x" + Integer.toHexString(dataType));
+            try { writeLatch.await(3, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+
+        private byte[] buildPacket(int dataType, byte[] payload) {
+            int payloadLen = payload == null ? 0 : payload.length;
+            int totalLen = payloadLen + 6;
+            byte[] pkt = new byte[totalLen];
+            pkt[0] = (byte) ((dataType >> 8) & 0xFF);
+            pkt[1] = (byte) (dataType & 0xFF);
+            pkt[2] = (byte) (totalLen & 0xFF);
+            pkt[3] = (byte) ((totalLen >> 8) & 0xFF);
+            if (payloadLen > 0) System.arraycopy(payload, 0, pkt, 4, payloadLen);
+            int crc = crc16(pkt, totalLen - 2);
+            pkt[totalLen - 2] = (byte) (crc & 0xFF);
+            pkt[totalLen - 1] = (byte) ((crc >> 8) & 0xFF);
+            return pkt;
+        }
+
+        private int crc16(byte[] data, int len) {
+            int crc = 0xFFFF;
+            for (int i = 0; i < len; i++) {
+                crc = ((crc << 8) & 0xFF00) | ((crc >> 8) & 0x00FF);
+                crc ^= data[i] & 0xFF;
+                crc ^= (crc & 0xFF) >> 4;
+                crc ^= (crc << 12) & 0xFFFF;
+                crc ^= ((crc & 0xFF) << 5) & 0xFFFF;
+                crc &= 0xFFFF;
+            }
+            return crc;
+        }
+
+        private long readU32LE(byte[] arr, int offset) {
+            return ((long) arr[offset] & 0xFF)
+                    | (((long) arr[offset + 1] & 0xFF) << 8)
+                    | (((long) arr[offset + 2] & 0xFF) << 16)
+                    | (((long) arr[offset + 3] & 0xFF) << 24);
+        }
+
+        private double localEpoch2000Seconds() {
+            Calendar cal = Calendar.getInstance();
+            cal.clear();
+            cal.set(2000, Calendar.JANUARY, 1, 0, 0, 0);
+            return cal.getTimeInMillis() / 1000.0;
+        }
+
+        private boolean hasBluetoothPermissionsForRing() {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                return ContextCompat.checkSelfPermission(AionPushService.this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+                        && ContextCompat.checkSelfPermission(AionPushService.this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+            }
+            return true;
+        }
+
+        private boolean looksLikeRing(ScanResult result, String name) {
+            if (name != null) {
+                String upper = name.toUpperCase(Locale.US);
+                if (upper.contains("SMART RING") || upper.contains("YCBT") || upper.startsWith("DFU")) return true;
+            }
+            ScanRecord record = result.getScanRecord();
+            if (record == null || record.getServiceUuids() == null) return false;
+            for (android.os.ParcelUuid uuid : record.getServiceUuids()) {
+                for (RingBleService svc : services) {
+                    if (svc.service.equals(uuid.getUuid())) return true;
+                }
+            }
+            return false;
+        }
+
+        private String getDeviceName(BluetoothDevice dev) {
+            try {
+                String name = dev.getName();
+                return name == null ? "" : name;
+            } catch (Exception e) {
+                return "";
+            }
+        }
+
+        private void sleepQuiet(long ms) {
+            try { Thread.sleep(ms); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
+
+        void close() {
+            connected = false;
+            try {
+                if (gatt != null) {
+                    gatt.disconnect();
+                    gatt.close();
+                }
+            } catch (Exception ignored) {}
+            gatt = null;
+            writeChar = null;
+            currentDevice = null;
+        }
+
+        private class RingBleService {
+            final UUID service;
+            final UUID write;
+            final UUID notify;
+            final String name;
+            RingBleService(String service, String write, String notify, String name) {
+                this.service = UUID.fromString(service);
+                this.write = UUID.fromString(write);
+                this.notify = UUID.fromString(notify);
+                this.name = name;
+            }
+        }
+
+        private class HeartRateRecord {
+            final double measuredAt;
+            final int heartRate;
+            final int mode;
+            HeartRateRecord(double measuredAt, int heartRate, int mode) {
+                this.measuredAt = measuredAt;
+                this.heartRate = heartRate;
+                this.mode = mode;
+            }
+        }
+    }
+
     // ══════════════════════════════════════════════════════════
     //  WebSocket 连接 — synchronized 防并发
     // ══════════════════════════════════════════════════════════
@@ -798,10 +1461,62 @@ public class AionPushService extends Service {
                     });
                     break;
                 }
+                case "request_ring_diag": {
+                    SharedPreferences rp = getSharedPreferences("aion_ring_ble", MODE_PRIVATE);
+                    boolean hasPerm = hasBluetoothPermissionsForRing();
+                    boolean btEnabled = false;
+                    try {
+                        BluetoothManager bm = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+                        BluetoothAdapter ad = bm != null ? bm.getAdapter() : null;
+                        btEnabled = ad != null && ad.isEnabled();
+                    } catch (Exception ignored) {}
+                    String info = "bluetoothEnabled=" + btEnabled
+                            + "; bluetoothPerm=" + hasPerm
+                            + "; ringThreadAlive=" + (ringSyncThread != null && ringSyncThread.isAlive())
+                            + "; savedName=" + rp.getString("device_name", "")
+                            + "; savedAddress=" + rp.getString("device_address", "")
+                            + "; lastUploadedMs=" + rp.getLong("bg_last_heart_measured_at", 0)
+                            + "; wsConnected=" + wsConnected.get()
+                            + "; foreground=" + isForegroundActive;
+                    Log.i(TAG, "💍 DIAG: " + info);
+                    postRingDiagNow("diag", info);
+                    break;
+                }
             }
         } catch (Exception e) {
             Log.w(TAG, "parse error: " + e.getMessage());
         }
+    }
+
+    private boolean hasBluetoothPermissionsForRing() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    private void postRingDiagNow(String status, String info) {
+        String httpBase = getHttpBase();
+        if (httpBase == null) return;
+        new Thread(() -> {
+            try {
+                JSONObject body = new JSONObject();
+                body.put("status", status);
+                body.put("info", info);
+                MediaType JSON_T = MediaType.get("application/json; charset=utf-8");
+                RequestBody reqBody = RequestBody.create(body.toString(), JSON_T);
+                Request req = new Request.Builder()
+                        .url(httpBase + "/api/health/ring/diag-report")
+                        .post(reqBody)
+                        .build();
+                try (Response resp = client.newCall(req).execute()) {
+                    Log.i(TAG, "💍 diag now posted: " + resp.code());
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "💍 diag now post failed: " + e.getMessage());
+            }
+        }, "RingDiag").start();
     }
 
     // ══════════════════════════════════════════════════════════

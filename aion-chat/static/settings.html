@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>设置 - Aion</title>
+<title>设置</title>
 <link rel="stylesheet" href="/static/common.css">
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -61,12 +61,31 @@
     <input class="form-input" type="text" id="aiproKeyInput" placeholder="输入中转站 API Key..." autocomplete="off" style="font-family:monospace">
     <label class="form-label">网易云 MUSIC_U Cookie（VIP 点歌）</label>
     <input class="form-input" type="text" id="neteaseMusicUInput" placeholder="浏览器 F12 → Cookie → MUSIC_U" autocomplete="off" style="font-family:monospace">
+
+    <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.08)">
+      <label class="form-label" style="font-size:15px;color:#ff8359">瑞幸咖啡 MCP</label>
+      <label class="form-label" style="display:flex;align-items:center;gap:8px;font-size:13px">
+        <input type="checkbox" id="luckinMcpEnabledInput" style="width:16px;height:16px">
+        启用瑞幸咖啡下单能力
+      </label>
+      <p style="font-size:12px;color:#aaa;margin:2px 0 10px 0">支付仍由你确认；系统只创建待支付订单并返回支付链接或二维码。</p>
+      <label class="form-label">MCP Token</label>
+      <input class="form-input" type="text" id="luckinMcpTokenInput" placeholder="从瑞幸开放平台复制 Bearer Token" autocomplete="off" style="font-family:monospace">
+      <label class="form-label">默认经度</label>
+      <input class="form-input" type="text" id="luckinLongitudeInput" placeholder="例如 116.397128" autocomplete="off" style="font-family:monospace">
+      <label class="form-label">默认纬度</label>
+      <input class="form-input" type="text" id="luckinLatitudeInput" placeholder="例如 39.916527" autocomplete="off" style="font-family:monospace">
+      <label class="form-label">默认门店关键词（可选）</label>
+      <input class="form-input" type="text" id="luckinShopKeywordInput" placeholder="例如 写字楼名 / 商场名 / 门店名" autocomplete="off">
+    </div>
+
     <div class="btn-row">
       <button class="btn-cancel" onclick="location.href='/'">取消</button>
       <button class="btn-save" onclick="saveSettings()">保存</button>
     </div>
   </div>
 </div>
+<script src="/static/theme.js?v=theme-20260606"></script>
 <script src="/static/common.js"></script>
 <script>
 connectCommonWS();
@@ -84,6 +103,11 @@ connectCommonWS();
   $("sfKeyInput").value = s.siliconflow_key || "";
   $("aiproKeyInput").value = s.aipro_key || "";
   $("neteaseMusicUInput").value = s.netease_music_u || "";
+  $("luckinMcpEnabledInput").checked = !!s.luckin_mcp_enabled;
+  $("luckinMcpTokenInput").value = s.luckin_mcp_token || "";
+  $("luckinLongitudeInput").value = s.luckin_default_longitude || "";
+  $("luckinLatitudeInput").value = s.luckin_default_latitude || "";
+  $("luckinShopKeywordInput").value = s.luckin_default_shop_keyword || "";
   refreshPhoneScreenStatus();
 })();
 
@@ -99,7 +123,12 @@ async function saveSettings() {
     embedding_model: $("embeddingModelInput").value.trim(),
     siliconflow_key: $("sfKeyInput").value.trim(),
     aipro_key: $("aiproKeyInput").value.trim(),
-    netease_music_u: $("neteaseMusicUInput").value.trim()
+    netease_music_u: $("neteaseMusicUInput").value.trim(),
+    luckin_mcp_enabled: $("luckinMcpEnabledInput").checked,
+    luckin_mcp_token: $("luckinMcpTokenInput").value.trim(),
+    luckin_default_longitude: $("luckinLongitudeInput").value.trim(),
+    luckin_default_latitude: $("luckinLatitudeInput").value.trim(),
+    luckin_default_shop_keyword: $("luckinShopKeywordInput").value.trim()
   });
   showToast("✅ 已保存");
 }

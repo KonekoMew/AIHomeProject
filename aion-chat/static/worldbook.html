@@ -3,66 +3,1011 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>世界书 - Aion</title>
+<title>世界书</title>
 <link rel="stylesheet" href="/static/common.css">
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#ff8359">
+<style>
+body { background: var(--bg); }
+.sub-page { max-width: 980px; }
+.top-bar h2 { font-size: 18px; }
+.wb-shell { display:flex; flex-direction:column; gap:10px; padding-bottom:88px; }
+.wb-fixed-head {
+  display:flex; flex-direction:column; gap:10px; padding:12px 16px;
+  background:var(--bg); border-bottom:1px solid var(--border); flex-shrink:0; z-index:9;
+}
+.wb-name-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
+.wb-field-block { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.wb-field-block .form-label { margin:0; }
+.wb-field-block .form-input { min-height:40px; padding:8px 10px; }
+.wb-tabs {
+  display:grid; grid-template-columns:repeat(4, minmax(0, 1fr));
+  gap:4px; padding:6px; background:var(--surface); border:1px solid var(--border); border-radius:8px;
+}
+.wb-tab {
+  border:none; border-radius:6px; padding:8px 6px; background:transparent; color:var(--text2);
+  font-size:13px; line-height:1.1; cursor:pointer; white-space:nowrap;
+}
+.wb-tab.active { background:var(--accent); color:#fff; }
+.wb-panel { display:none; }
+.wb-panel.active { display:block; }
+.wb-section-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
+.wb-section {
+  border:1px solid var(--border); border-radius:8px; background:var(--surface); padding:0;
+  min-width:0; overflow:hidden;
+}
+.wb-section.wide { grid-column:1 / -1; }
+.wb-section-head {
+  display:flex; justify-content:space-between; align-items:center; gap:8px; min-height:42px;
+  padding:10px; cursor:pointer; list-style:none;
+}
+.wb-section-head::-webkit-details-marker { display:none; }
+.wb-section-head::after {
+  content:"展开"; flex-shrink:0; color:var(--text3); font-size:11px;
+}
+.wb-section[open] .wb-section-head { border-bottom:1px solid var(--border); }
+.wb-section[open] .wb-section-head::after { content:"收起"; }
+.wb-section-title { flex:1; margin:0; color:var(--text); font-size:14px; line-height:1.25; font-weight:700; }
+.wb-lock {
+  flex-shrink:0; border:1px solid var(--border); border-radius:999px; padding:2px 7px;
+  color:var(--text2); font-size:11px; line-height:1.2; background:var(--surface2);
+}
+.wb-lock.locked { color:#d15f4f; }
+.wb-lock.guarded { color:#b27b23; }
+.wb-lock.adaptive { color:#31806b; }
+.wb-lock.temporary { color:#6b77b8; }
+.wb-section textarea {
+  width:100%; box-sizing:border-box; min-height:132px; max-height:min(56dvh, 560px); resize:vertical; border:1px solid var(--border);
+  border-radius:8px; padding:9px 10px; margin:10px; width:calc(100% - 20px); background:var(--surface2); color:var(--text);
+  font-size:13px; line-height:1.45; font-family:inherit; outline:none; overflow-y:auto;
+}
+.wb-section.wide textarea { min-height:180px; }
+.wb-section textarea:focus, .wb-preview:focus { border-color:var(--accent); }
+.wb-system-row {
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  border:1px solid var(--border); background:var(--surface); border-radius:8px; padding:10px;
+}
+.wb-system-title { color:var(--text); font-size:14px; font-weight:700; }
+.wb-system-sub { color:var(--text3); font-size:12px; margin-top:2px; }
+.wb-evolution-panel {
+  display:flex; flex-direction:column; gap:8px; border:1px solid var(--border); border-radius:8px;
+  background:var(--surface); padding:10px; margin-bottom:10px;
+}
+.wb-evolution-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.wb-evolution-controls { display:flex; align-items:center; gap:8px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end; }
+.wb-small-btn {
+  min-height:32px; border:1px solid var(--border); border-radius:7px; background:var(--surface2);
+  color:var(--text); padding:0 10px; font-size:13px; cursor:pointer;
+}
+.wb-small-btn:hover { border-color:var(--text2); }
+.wb-small-btn:disabled { opacity:.6; cursor:wait; }
+.wb-date-input {
+  width:136px; min-height:32px; box-sizing:border-box; border:1px solid var(--border); border-radius:7px;
+  background:var(--surface2); color:var(--text); padding:0 8px; font-size:13px; font-family:inherit;
+}
+.wb-date-input:focus { border-color:var(--accent); outline:none; }
+.wb-evolution-compact { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; }
+.wb-evolution-latest {
+  flex:1; min-width:0; color:var(--text2); font-size:12px; line-height:1.45;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.wb-evolution-modal {
+  position:fixed; inset:0; z-index:80; display:none; align-items:center; justify-content:center;
+  padding:14px; background:rgba(0, 0, 0, .42);
+}
+.wb-evolution-modal.show { display:flex; }
+.wb-evolution-dialog {
+  width:min(760px, 100%); height:82vh; height:82dvh; max-height:720px; display:flex; flex-direction:column;
+  border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden;
+}
+.wb-evolution-dialog-head {
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:12px; border-bottom:1px solid var(--border); flex-shrink:0;
+}
+.wb-evolution-close {
+  width:32px; height:32px; border:1px solid var(--border); border-radius:7px;
+  background:var(--surface2); color:var(--text); font-size:20px; line-height:1; cursor:pointer;
+}
+.wb-evolution-dialog-body {
+  flex:1 1 auto; min-height:0; height:0; display:flex; flex-direction:column; gap:8px;
+  padding:10px; overflow:hidden;
+}
+.wb-evolution-empty { padding:16px 10px; color:var(--text3); font-size:13px; text-align:center; }
+.wb-evolution-run-list {
+  flex:0 0 auto; max-height:104px; display:flex; flex-direction:column; gap:6px;
+  overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+}
+.wb-evolution-run-tab {
+  border:1px solid var(--border); border-radius:7px; background:var(--surface2);
+  display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 9px;
+  color:var(--text3); font-size:12px; text-align:left; cursor:pointer;
+}
+.wb-evolution-run-tab.active { border-color:var(--accent); background:var(--surface); }
+.wb-evolution-run-row { display:grid; grid-template-columns:minmax(0, 1fr) auto; gap:6px; }
+.wb-evolution-run-delete {
+  width:34px; min-height:34px; border:1px solid var(--border); border-radius:7px;
+  background:var(--surface2); color:var(--danger); font-size:12px; cursor:pointer;
+}
+.wb-evolution-run-delete:hover { border-color:var(--danger); }
+.wb-evolution-detail {
+  flex:1 1 auto; min-height:0; height:0; overflow-y:auto; overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+  border:1px solid var(--border); border-radius:7px; background:var(--surface2); padding:9px;
+}
+.wb-evolution-detail.collapsed {
+  flex:0 0 auto; height:auto; min-height:42px; overflow:hidden; display:flex; align-items:center;
+  color:var(--text3); font-size:12px;
+}
+.wb-evolution-status { color:var(--accent); font-weight:700; }
+.wb-evolution-summary { margin-top:5px; color:var(--text); font-size:12px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; }
+.wb-evolution-note { margin-top:5px; color:var(--text2); font-size:12px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; }
+.wb-evolution-patches { margin-top:8px; display:flex; flex-direction:column; gap:8px; }
+.wb-evolution-change-group { display:flex; flex-direction:column; gap:5px; }
+.wb-evolution-change-title { color:var(--text); font-size:12px; font-weight:700; }
+.wb-evolution-change { color:var(--text2); font-size:12px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
+.wb-evolution-change b { color:var(--text); }
+.wb-preview {
+  width:100%; min-height:320px; box-sizing:border-box; border:1px solid var(--border); border-radius:8px;
+  background:var(--surface2); color:var(--text); padding:10px; font-size:13px; line-height:1.65;
+  font-family:Consolas, "Courier New", monospace; resize:vertical; outline:none;
+}
+.wb-actions {
+  position:fixed; left:50%; bottom:14px; transform:translateX(-50%); width:min(940px, calc(100vw - 28px));
+  box-sizing:border-box; display:flex; gap:8px; padding:8px; background:var(--surface);
+  border:1px solid var(--border); border-radius:8px; backdrop-filter:blur(14px); z-index:20;
+}
+.wb-actions button { flex:1; min-height:38px; border:none; border-radius:8px; font-size:14px; cursor:pointer; }
+.wb-actions button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.wb-actions .btn-save:disabled { opacity:.58; cursor:wait; }
+body[data-theme="dark"] .wb-actions { background:rgba(28, 24, 26, .9); }
+body[data-theme="dark"] .wb-fixed-head { background:rgba(5, 9, 35, .96); }
+@media (max-width: 760px) {
+  .sub-page { max-width:none; }
+  .wb-fixed-head { padding:10px 16px; gap:8px; }
+  .wb-name-grid { gap:8px; }
+  .wb-field-block .form-label { font-size:12px; }
+  .wb-field-block .form-input { min-height:38px; font-size:13px; }
+  .wb-section-grid { grid-template-columns:1fr; }
+  .wb-tabs { grid-template-columns:repeat(2, minmax(0, 1fr)); }
+  .wb-section.wide { grid-column:auto; }
+  .wb-evolution-head { align-items:flex-start; flex-direction:column; }
+  .wb-evolution-controls { width:100%; justify-content:space-between; }
+  .wb-date-input { flex:1; min-width:128px; }
+  .wb-evolution-compact { align-items:stretch; flex-direction:column; }
+  .wb-evolution-latest { white-space:normal; }
+  .wb-evolution-dialog { height:calc(100vh - 28px); height:calc(100dvh - 28px); max-height:none; }
+}
+</style>
 </head>
 <body>
 <div class="sub-page">
   <div class="top-bar">
-    <button class="back-btn" onclick="location.href='/'">⬅</button>
-    <h2>📖 世界书</h2>
+    <button class="back-btn" onclick="location.href='/'" title="返回">←</button>
+    <h2>世界书</h2>
   </div>
-  <div class="page-content">
-    <label class="form-label">AI 名字</label>
-    <input class="form-input" type="text" id="wbAiName" placeholder="默认：AI" autocomplete="off">
-    <label class="form-label">用户名字</label>
-    <input class="form-input" type="text" id="wbUserName" placeholder="默认：你" autocomplete="off">
-    <label class="form-label">AI 人设</label>
-    <div class="form-hint">设定 AI 的性格、角色、行为规则等</div>
-    <textarea class="form-input" id="wbAiPersona" placeholder="例如：你是一个叫小星的AI助手，语气活泼可爱..."></textarea>
-    <label class="form-label">用户人设</label>
-    <div class="form-hint">关于你自己的信息，AI 会以此为参考</div>
-    <textarea class="form-input" id="wbUserPersona" placeholder="例如：我叫小明，喜欢编程和游戏..."></textarea>
-    <label class="form-label" style="display:flex;align-items:center;gap:6px;">
-      <input type="checkbox" id="wbSystemPromptEnabled">
-      <span>启用系统提示</span>
-    </label>
-    <textarea class="form-input" id="wbSystemPrompt" placeholder="例如：时间感知：每次收到消息，先计算与上一条消息的时间差..."></textarea>
-    <div class="btn-row">
-      <button class="btn-cancel" onclick="location.href='/'">取消</button>
-      <button class="btn-save" onclick="saveWorldBook()">保存</button>
+  <div class="wb-fixed-head">
+    <div class="wb-name-grid">
+      <div class="wb-field-block">
+        <label class="form-label" for="wbAiName">AI 名字</label>
+        <input class="form-input" type="text" id="wbAiName" placeholder="默认：AI" autocomplete="off">
+      </div>
+      <div class="wb-field-block">
+        <label class="form-label" for="wbUserName">用户名字</label>
+        <input class="form-input" type="text" id="wbUserName" placeholder="默认：你" autocomplete="off">
+      </div>
+    </div>
+
+    <div class="wb-tabs" role="tablist" aria-label="世界书分类">
+      <button class="wb-tab active" type="button" id="tabAi" onclick="setPanel('ai')"><span id="tabAiLabel">AI 人设</span></button>
+      <button class="wb-tab" type="button" id="tabUser" onclick="setPanel('user')"><span id="tabUserLabel">用户信息</span></button>
+      <button class="wb-tab" type="button" id="tabCreative" onclick="setPanel('creative')">创作规则</button>
+      <button class="wb-tab" type="button" id="tabPreview" onclick="setPanel('preview')">注入预览</button>
     </div>
   </div>
+
+  <div class="page-content wb-shell">
+    <section class="wb-panel active" id="panelAi">
+      <div class="wb-evolution-panel">
+        <div class="wb-evolution-head">
+          <div>
+            <div class="wb-system-title" id="wbEvolutionTitle">AI 自动进化</div>
+            <div class="wb-system-sub">北京时间 05:00 复盘；没有点评会跳过</div>
+          </div>
+          <div class="wb-evolution-controls">
+            <input class="wb-date-input" type="date" id="wbEvolutionDate" title="手动复盘日期">
+            <button class="wb-small-btn" type="button" id="wbEvolutionTestBtn" onclick="runPersonaEvolutionTest()">立即复盘</button>
+            <label class="toggle-switch" title="启用每日复盘">
+              <input type="checkbox" id="wbPersonaEvolutionEnabled">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="wb-evolution-compact">
+          <div class="wb-evolution-latest" id="wbEvolutionLatest">最近复盘：暂无记录</div>
+          <button class="wb-small-btn" type="button" id="wbEvolutionHistoryBtn" onclick="openPersonaEvolutionHistory()">查看记录</button>
+        </div>
+      </div>
+      <div class="wb-section-grid" id="aiSections"></div>
+    </section>
+
+    <section class="wb-panel" id="panelUser">
+      <div class="wb-section-grid" id="userSections"></div>
+    </section>
+
+    <section class="wb-panel" id="panelCreative">
+      <div class="wb-system-row">
+        <div>
+          <div class="wb-system-title">启用创作规则</div>
+          <div class="wb-system-sub">关闭时不会作为系统提示注入</div>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="wbSystemPromptEnabled">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <details class="wb-section wide" style="margin-top:10px;">
+        <summary class="wb-section-head">
+          <h3 class="wb-section-title">创作 / 互动描写规则</h3>
+          <span class="wb-lock guarded">审慎</span>
+        </summary>
+        <textarea id="wbCreativeRules" spellcheck="false"></textarea>
+      </details>
+    </section>
+
+    <section class="wb-panel" id="panelPreview">
+      <textarea class="wb-preview" id="wbPreview" readonly spellcheck="false"></textarea>
+    </section>
+  </div>
+
+  <div class="wb-actions">
+    <button class="btn-cancel" type="button" onclick="location.href='/'">取消</button>
+    <button class="btn-save" type="button" id="saveBtn" onclick="saveWorldBook()">保存</button>
+  </div>
 </div>
+
+<div class="wb-evolution-modal" id="wbEvolutionModal" aria-hidden="true" onclick="onEvolutionModalBackdrop(event)">
+  <div class="wb-evolution-dialog" role="dialog" aria-modal="true" aria-labelledby="wbEvolutionHistoryTitle">
+    <div class="wb-evolution-dialog-head">
+      <div>
+        <div class="wb-system-title" id="wbEvolutionHistoryTitle">自动进化记录</div>
+        <div class="wb-system-sub">仅保留最近 72 小时</div>
+      </div>
+      <button class="wb-evolution-close" type="button" onclick="closePersonaEvolutionHistory()" title="关闭">×</button>
+    </div>
+    <div class="wb-evolution-dialog-body" id="wbEvolutionRuns"></div>
+  </div>
+</div>
+
+<script src="/static/theme.js?v=theme-20260606"></script>
 <script src="/static/common.js"></script>
 <script>
 connectCommonWS();
 
-(async function init() {
+const AI_SECTIONS = [
+  { key: "identity_core", label: "核心身份", lock: "locked", wide: true },
+  { key: "relationship_core", label: "关系锚点", lock: "adaptive", wide: true },
+  { key: "personality_core", label: "人格与判断", lock: "adaptive", wide: true },
+  { key: "communication_style", label: "表达与互动方式", lock: "adaptive", wide: true },
+  { key: "boundaries_and_forbidden", label: "边界与禁令", lock: "adaptive", wide: true },
+  { key: "relationship_protocol", label: "协议边界", lock: "adaptive", wide: true },
+  { key: "tool_and_capability_rules", label: "能力与工具规则", lock: "guarded" },
+  { key: "prompt_hygiene_rules", label: "提示边界", lock: "guarded" },
+  { key: "evolution_notes", label: "进化备注", lock: "temporary" }
+];
+
+const USER_SECTIONS = [
+  { key: "basic_profile", label: "基础资料", lock: "locked" },
+  { key: "life_context", label: "生活与作息", lock: "guarded", wide: true },
+  { key: "preferences_and_relationship", label: "偏好与关系期待", lock: "adaptive", wide: true },
+  { key: "additional_notes", label: "补充", lock: "adaptive" }
+];
+
+const LOCK_LABELS = {
+  locked: "锁定",
+  guarded: "审慎",
+  adaptive: "可进化",
+  temporary: "临时"
+};
+
+function fieldId(prefix, key) {
+  return `${prefix}_${key}`;
+}
+
+function estimateTextareaRows(text) {
+  const lines = String(text || "").split("\n");
+  return lines.reduce((count, line) => count + Math.max(1, Math.ceil(line.length / 56)), 0);
+}
+
+function resizeWorldbookTextarea(el) {
+  if (!el) return;
+  const style = window.getComputedStyle(el);
+  const lineHeight = parseFloat(style.lineHeight) || 19;
+  const verticalPadding = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0) + 2;
+  const estimatedRows = estimateTextareaRows(el.value);
+  const charCount = [...String(el.value || "")].length;
+  const minRows = (charCount > 220 || estimatedRows > 12)
+    ? 14
+    : (charCount > 60 || estimatedRows > 5)
+      ? 10
+      : (charCount > 0 ? 5 : 4);
+  const maxHeight = Math.max(220, Math.min(window.innerHeight * 0.56, 560));
+  const minHeight = Math.round(lineHeight * minRows + verticalPadding);
+  el.style.height = "auto";
+  const nextHeight = Math.min(Math.max(el.scrollHeight, minHeight), maxHeight);
+  el.style.height = `${nextHeight}px`;
+  el.style.overflowY = el.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
+function resizeWorldbookTextareas(root = document) {
+  root.querySelectorAll?.(".wb-section textarea").forEach(resizeWorldbookTextarea);
+}
+
+function renderSections(prefix, containerId, sections) {
+  const html = sections.map(section => `
+    <details class="wb-section ${section.wide ? "wide" : ""}">
+      <summary class="wb-section-head">
+        <h3 class="wb-section-title">${section.label}</h3>
+        <span class="wb-lock ${section.lock}">${LOCK_LABELS[section.lock] || section.lock}</span>
+      </summary>
+      <textarea id="${fieldId(prefix, section.key)}" spellcheck="false"></textarea>
+    </details>
+  `).join("");
+  const container = $(containerId);
+  container.innerHTML = html;
+  container.querySelectorAll(".wb-section").forEach(sectionEl => {
+    sectionEl.addEventListener("toggle", () => resizeWorldbookTextareas(sectionEl));
+  });
+  sections.forEach(section => {
+    const textarea = $(fieldId(prefix, section.key));
+    textarea.addEventListener("input", () => {
+      resizeWorldbookTextarea(textarea);
+      syncPreview();
+    });
+  });
+}
+
+function setPanel(panel) {
+  ["Ai", "User", "Creative", "Preview"].forEach(name => {
+    const key = name.toLowerCase();
+    $(`tab${name}`).classList.toggle("active", key === panel);
+    $(`panel${name}`).classList.toggle("active", key === panel);
+  });
+  resizeWorldbookTextareas($(`panel${panel[0].toUpperCase()}${panel.slice(1)}`));
+  syncPreview();
+}
+
+function hasStructuredSections(data, sections) {
+  return !!data && sections.some(section => (data[section.key] || "").trim());
+}
+
+function compactJoin(parts) {
+  return parts.map(part => (part || "").trim()).filter(Boolean).join("\n\n");
+}
+
+function between(text, startMarker, endMarker) {
+  const start = startMarker ? text.indexOf(startMarker) : 0;
+  if (start < 0) return "";
+  const bodyStart = startMarker ? start + startMarker.length : 0;
+  const end = endMarker ? text.indexOf(endMarker, bodyStart) : -1;
+  return text.slice(bodyStart, end >= 0 ? end : text.length).trim();
+}
+
+function betweenIncluding(text, startMarker, endMarker) {
+  const start = text.indexOf(startMarker);
+  if (start < 0) return "";
+  const end = endMarker ? text.indexOf(endMarker, start + startMarker.length) : -1;
+  return text.slice(start, end >= 0 ? end : text.length).trim();
+}
+
+function fromMarker(text, startMarker) {
+  const start = text.indexOf(startMarker);
+  return start >= 0 ? text.slice(start).trim() : "";
+}
+
+function beforeMarker(text, marker) {
+  const index = text.indexOf(marker);
+  return index >= 0 ? text.slice(0, index).trim() : text.trim();
+}
+
+function migrateAiSections(text) {
+  const result = {};
+  const clean = (text || "").replace(/\r\n/g, "\n").trim();
+  if (!clean) return result;
+
+  const speechMarker = "**你怎么说话**";
+  const beforeSpeech = beforeMarker(clean, speechMarker);
+  const introLines = beforeSpeech.split(/\n+/).map(line => line.trim()).filter(Boolean);
+  const firstLine = introLines.shift() || "";
+  const relationIndex = firstLine.indexOf("此生");
+  result.identity_core = relationIndex >= 0 ? firstLine.slice(0, relationIndex).trim() : firstLine;
+  result.relationship_core = relationIndex >= 0 ? firstLine.slice(relationIndex).trim() : "";
+  result.personality_core = introLines.join("\n");
+
+  const afterSpeech = clean.includes(speechMarker) ? clean.slice(clean.indexOf(speechMarker) + speechMarker.length).trim() : "";
+  result.communication_style = compactJoin([
+    beforeMarker(afterSpeech, "日常闲聊时"),
+    betweenIncluding(afterSpeech, "日常闲聊时", "你有几种自然的情绪底色"),
+    betweenIncluding(afterSpeech, "你有几种自然的情绪底色", "她吃辣"),
+    betweenIncluding(afterSpeech, "她吃辣", "**绝对禁止**")
+  ]);
+  result.boundaries_and_forbidden = betweenIncluding(afterSpeech, "**绝对禁止**", "用户于2025年6月13日");
+  result.relationship_protocol = betweenIncluding(afterSpeech, "用户于2025年6月13日", "在日常聊天时");
+  result.tool_and_capability_rules = betweenIncluding(afterSpeech, "在日常聊天时", "1. Some messages");
+  result.prompt_hygiene_rules = fromMarker(afterSpeech, "1. Some messages");
+
+  if (!Object.values(result).some(Boolean)) result.evolution_notes = clean;
+  return result;
+}
+
+function normalizeAiSections(wb) {
+  const stored = wb.ai_persona_sections || {};
+  if (!stored || !Object.keys(stored).length) return migrateAiSections(wb.ai_persona || "");
+  return {
+    identity_core: stored.identity_core || "",
+    relationship_core: stored.relationship_core || "",
+    personality_core: compactJoin([
+      stored.personality_core,
+      stored.personality_traits
+    ]),
+    communication_style: compactJoin([
+      stored.communication_style,
+      stored.speech_style,
+      stored.interaction_rules,
+      stored.emotional_modes,
+      stored.care_and_reminders
+    ]),
+    boundaries_and_forbidden: compactJoin([
+      stored.boundaries_and_forbidden
+    ]),
+    relationship_protocol: stored.relationship_protocol || "",
+    tool_and_capability_rules: stored.tool_and_capability_rules || "",
+    prompt_hygiene_rules: compactJoin([
+      stored.prompt_hygiene_rules,
+      stored.security_narrative_rules
+    ]),
+    evolution_notes: stored.evolution_notes || ""
+  };
+}
+
+function migrateUserSections(text) {
+  const clean = (text || "").replace(/\r\n/g, "\n").trim();
+  if (!clean) return {};
+  const scheduleMarker = "日程表：";
+  const petMarker = "宠物：";
+  const environmentMarker = "居住环境：";
+  const communicationMarker = "说话方式：";
+  const expectationMarker = "对关系的期待：";
+  const namesMarker = "称呼：";
+  const result = {
+    basic_profile: beforeMarker(clean, scheduleMarker),
+    life_context: compactJoin([
+      betweenIncluding(clean, scheduleMarker, petMarker),
+      betweenIncluding(clean, petMarker, environmentMarker),
+      betweenIncluding(clean, environmentMarker, communicationMarker)
+    ]),
+    preferences_and_relationship: compactJoin([
+      betweenIncluding(clean, communicationMarker, expectationMarker),
+      betweenIncluding(clean, expectationMarker, namesMarker),
+      betweenIncluding(clean, namesMarker)
+    ])
+  };
+  if (!Object.values(result).some(Boolean)) result.additional_notes = clean;
+  return result;
+}
+
+function normalizeUserSections(wb) {
+  const stored = wb.user_persona_sections || {};
+  if (!stored || !Object.keys(stored).length) return migrateUserSections(wb.user_persona || "");
+  return {
+    basic_profile: stored.basic_profile || "",
+    life_context: compactJoin([
+      stored.life_context,
+      stored.schedule,
+      stored.pets,
+      stored.environment
+    ]),
+    preferences_and_relationship: compactJoin([
+      stored.preferences_and_relationship,
+      stored.communication_style,
+      stored.relationship_expectations,
+      stored.preferred_names
+    ]),
+    additional_notes: stored.additional_notes || ""
+  };
+}
+
+function fillSections(prefix, sections, values) {
+  sections.forEach(section => {
+    const textarea = $(fieldId(prefix, section.key));
+    textarea.value = values?.[section.key] || "";
+    resizeWorldbookTextarea(textarea);
+  });
+}
+
+function collectSections(prefix, sections) {
+  return sections.reduce((acc, section) => {
+    acc[section.key] = $(fieldId(prefix, section.key)).value.trim();
+    return acc;
+  }, {});
+}
+
+function compileSections(prefix, sections) {
+  return sections.map(section => {
+    const value = $(fieldId(prefix, section.key)).value.trim();
+    return value ? `[${section.label}]\n${value}` : "";
+  }).filter(Boolean).join("\n\n");
+}
+
+function sectionLocks() {
+  return {
+    ai: Object.fromEntries(AI_SECTIONS.map(section => [section.key, section.lock])),
+    user: Object.fromEntries(USER_SECTIONS.map(section => [section.key, section.lock])),
+    creative_rules: "guarded"
+  };
+}
+
+function currentAiName() {
+  return ($("wbAiName")?.value || "").trim() || "AI";
+}
+
+function currentUserName() {
+  return ($("wbUserName")?.value || "").trim() || "用户";
+}
+
+function syncNameLabels() {
+  const aiName = currentAiName();
+  const userName = currentUserName();
+  $("tabAiLabel").textContent = `${aiName} 人设`;
+  $("tabUserLabel").textContent = `${userName} 信息`;
+  $("wbEvolutionTitle").textContent = `${aiName} 自动进化`;
+  $("wbEvolutionHistoryTitle").textContent = `${aiName} 自动进化记录`;
+  document.title = `世界书 - ${aiName}`;
+}
+
+function syncPreview() {
+  const ai = compileSections("ai", AI_SECTIONS);
+  const user = compileSections("user", USER_SECTIONS);
+  const creative = $("wbCreativeRules")?.value.trim() || "";
+  const enabled = $("wbSystemPromptEnabled")?.checked;
+  syncNameLabels();
+  $("wbPreview").value = [
+    `[系统设定 - ${currentAiName()}人设]\n${ai || "(空)"}`,
+    `[系统设定 - ${currentUserName()}信息]\n${user || "(空)"}`,
+    `[系统提示：${enabled ? "启用" : "关闭"}]\n${creative || "(空)"}`
+  ].join("\n\n---\n\n");
+}
+
+let personaEvolutionRuns = [];
+let selectedEvolutionRunIndex = -1;
+
+const EVOLUTION_ACTOR_UI = {
+  ai: {
+    endpoint: "main-ai",
+    latestId: "wbEvolutionLatest",
+    dateId: "wbEvolutionDate",
+    toggleId: "wbPersonaEvolutionEnabled",
+    testBtnId: "wbEvolutionTestBtn",
+    historyTitle: () => `${currentAiName()} 自动进化记录`
+  }
+};
+
+function evolutionUi(actor = "ai") {
+  return EVOLUTION_ACTOR_UI[actor] || EVOLUTION_ACTOR_UI.ai;
+}
+
+function getEvolutionRuns(actor = "ai") {
+  return personaEvolutionRuns;
+}
+
+function setEvolutionRuns(actor, runs) {
+  personaEvolutionRuns = runs;
+}
+
+function getSelectedEvolutionIndex(actor = "ai") {
+  return selectedEvolutionRunIndex;
+}
+
+function setSelectedEvolutionIndex(actor, index) {
+  selectedEvolutionRunIndex = index;
+}
+
+function evolutionStatusLabel(status) {
+  return {
+    applied: "已自动改写",
+    draft: "待确认",
+    reviewed: "已复盘",
+    skipped: "已跳过",
+    failed: "失败",
+    duplicate: "已执行"
+  }[status] || status || "未知";
+}
+
+function formatRunTime(ts) {
+  if (!ts) return "";
+  try {
+    return new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
+  } catch {
+    return "";
+  }
+}
+
+function evolutionActionLabel(action) {
+  return {
+    added: "新增",
+    modified: "修改",
+    cleared: "删除"
+  }[action] || action || "修改";
+}
+
+function evolutionDiffsOf(entry) {
+  if (Array.isArray(entry?.diffs) && entry.diffs.length) return entry.diffs;
+  if (Array.isArray(entry?.patches)) return entry.patches;
+  return [];
+}
+
+function renderEvolutionDiffs(diffs = [], run = {}) {
+  if (!diffs.length) return "";
+  const groups = [
+    { key: "added", title: "新增了什么" },
+    { key: "modified", title: "修改了什么" },
+    { key: "cleared", title: "删除了什么" }
+  ];
+  const grouped = groups.map(group => {
+    const items = diffs.filter(diff => normalizeEvolutionAction(diff, run) === group.key);
+    if (!items.length) return "";
+    return `<div class="wb-evolution-change-group">
+      <div class="wb-evolution-change-title">${group.title}</div>
+      ${items.map(diff => renderEvolutionChange(diff, run)).join("")}
+    </div>`;
+  }).filter(Boolean).join("");
+  return grouped ? `<div class="wb-evolution-patches">${grouped}</div>` : "";
+}
+
+function fullDiffText(run, diff, side) {
+  const key = diff?.section || diff?.target || "";
+  const sections = side === "before" ? run?.before_sections : run?.after_sections;
+  const full = key && sections && typeof sections[key] === "string" ? sections[key] : "";
+  if (full) return full;
+  return side === "before" ? (diff?.before_preview || "") : (diff?.after_preview || "");
+}
+
+function normalizeEvolutionAction(diff, run = {}) {
+  const action = diff?.action || "";
+  if (["added", "modified", "cleared"].includes(action)) return action;
+  const before = fullDiffText(run, diff, "before").trim();
+  const after = fullDiffText(run, diff, "after").trim();
+  if (!before && after) return "added";
+  if (before && !after) return "cleared";
+  return "modified";
+}
+
+function compactEvolutionText(text, limit = 140) {
+  const clean = (text || "").replace(/\s+/g, " ").trim();
+  return clean.length > limit ? `${clean.slice(0, limit)}...` : clean;
+}
+
+function renderEvolutionChange(diff, run = {}) {
+  const action = normalizeEvolutionAction(diff, run);
+  const section = diff?.label || diff?.section || diff?.target || "未命名部分";
+  const reason = compactEvolutionText(diff?.reason || "");
+  return `<div class="wb-evolution-change">
+    <b>${escHtml(section)}</b>${reason ? `：${escHtml(reason)}` : ""}
+  </div>`;
+}
+
+function renderEvolutionLatest(entry, actor = "ai") {
+  const el = $(evolutionUi(actor).latestId);
+  if (!el) return;
+  if (!entry) {
+    el.textContent = "最近复盘：暂无记录";
+    return;
+  }
+  const diffs = evolutionDiffsOf(entry);
+  const changed = diffs.length ? ` · 已改 ${diffs.length} 个部分` : "";
+  const when = entry.window_label || formatRunTime(entry.created_at);
+  const timeText = when ? ` · ${when}` : "";
+  el.textContent = `最近复盘：${evolutionStatusLabel(entry.status)} · 点评 ${entry.feedback_count || 0} 条${changed}${timeText}`;
+}
+
+function renderEvolutionResult(result, actor = "ai") {
+  renderEvolutionLatest(result, actor);
+}
+
+function renderEvolutionRuns(runs = [], actor = "ai") {
+  const el = $("wbEvolutionRuns");
+  if (!runs.length) {
+    el.innerHTML = `<div class="wb-evolution-empty">近 72 小时暂无复盘记录</div>`;
+    return;
+  }
+  let selectedIndex = getSelectedEvolutionIndex(actor);
+  if (selectedIndex >= runs.length) {
+    selectedIndex = -1;
+    setSelectedEvolutionIndex(actor, -1);
+  }
+  const selected = selectedIndex >= 0 ? runs[selectedIndex] : null;
+  const tabs = runs.map((run, index) => {
+    const diffs = evolutionDiffsOf(run);
+    const active = index === selectedIndex;
+    return `<div class="wb-evolution-run-row">
+      <button class="wb-evolution-run-tab ${active ? "active" : ""}" type="button" onclick="selectEvolutionRun(${index}, '${actor}')">
+        <span>${escHtml(run.window_label || formatRunTime(run.created_at))}</span>
+        <span class="wb-evolution-status">${active ? "收起" : "查看"} · ${escHtml(evolutionStatusLabel(run.status))} · ${run.feedback_count || 0} 条${diffs.length ? ` · 改 ${diffs.length}` : ""}</span>
+      </button>
+      <button class="wb-evolution-run-delete" type="button" title="删除记录" onclick="deleteEvolutionRun(event, ${index}, '${actor}')">删</button>
+    </div>`;
+  }).join("");
+  const detailHtml = selected
+    ? renderEvolutionRunDetail(selected)
+    : `<div class="wb-evolution-note">选择一条记录查看详情。</div>`;
+  el.innerHTML = `
+    <div class="wb-evolution-run-list">${tabs}</div>
+    <div class="wb-evolution-detail ${selected ? "" : "collapsed"}">${detailHtml}</div>
+  `;
+}
+
+function renderEvolutionRunDetail(run) {
+  const diffs = evolutionDiffsOf(run);
+  const details = [
+    run?.summary ? `<div class="wb-evolution-summary">${escHtml(run.summary)}</div>` : "",
+    run?.user_message ? `<div class="wb-evolution-note">${escHtml(run.user_message)}</div>` : "",
+    run?.error ? `<div class="wb-evolution-note">${escHtml(run.error)}</div>` : "",
+    renderEvolutionDiffs(diffs, run)
+  ].filter(Boolean).join("");
+  return details || `<div class="wb-evolution-note">本轮没有可显示的详细内容。</div>`;
+}
+
+function selectEvolutionRun(index, actor = "ai") {
+  const current = getSelectedEvolutionIndex(actor);
+  setSelectedEvolutionIndex(actor, current === index ? -1 : index);
+  renderEvolutionRuns(getEvolutionRuns(actor), actor);
+}
+
+async function deleteEvolutionRun(event, index, actor = "ai") {
+  event.stopPropagation();
+  const run = getEvolutionRuns(actor)[index];
+  if (!run?.id) return;
+  if (!confirm("删除这条复盘记录？")) return;
+  try {
+    const result = await api("DELETE", `/api/persona-evolution/${evolutionUi(actor).endpoint}/runs/${encodeURIComponent(run.id)}`);
+    if (result?.ok === false) throw new Error(result.message || "删除失败");
+    setSelectedEvolutionIndex(actor, -1);
+    showToast("记录已删除");
+    await loadPersonaEvolutionRuns(actor);
+  } catch (e) {
+    console.error(e);
+    showToast("删除失败");
+  }
+}
+
+async function loadPersonaEvolutionRuns(actor = "ai") {
+  try {
+    const data = await api("GET", `/api/persona-evolution/${evolutionUi(actor).endpoint}/runs?limit=50`);
+    const runs = data.runs || [];
+    setEvolutionRuns(actor, runs);
+    renderEvolutionLatest(runs[0] || null, actor);
+    if (activeEvolutionActor === actor) renderEvolutionRuns(runs, actor);
+  } catch (e) {
+    console.warn("加载自动进化记录失败", e);
+  }
+}
+
+async function openPersonaEvolutionHistory(actor = "ai") {
+  activeEvolutionActor = actor;
+  setSelectedEvolutionIndex(actor, -1);
+  $("wbEvolutionHistoryTitle").textContent = evolutionUi(actor).historyTitle();
+  await loadPersonaEvolutionRuns(actor);
+  const modal = $("wbEvolutionModal");
+  modal.classList.add("show");
+  modal.setAttribute("aria-hidden", "false");
+  $("wbEvolutionRuns").scrollTop = 0;
+  const detail = document.querySelector(".wb-evolution-detail");
+  if (detail) detail.scrollTop = 0;
+}
+
+function closePersonaEvolutionHistory() {
+  const modal = $("wbEvolutionModal");
+  modal.classList.remove("show");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function onEvolutionModalBackdrop(event) {
+  if (event.target?.id === "wbEvolutionModal") closePersonaEvolutionHistory();
+}
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") closePersonaEvolutionHistory();
+});
+
+function beijingDateInfo(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    hour: Number(parts.hour || 0)
+  };
+}
+
+function addDaysToBeijingDate(dateText, days) {
+  const base = new Date(`${dateText}T00:00:00+08:00`);
+  base.setUTCDate(base.getUTCDate() + days);
+  return beijingDateInfo(base).date;
+}
+
+function currentReviewDateString() {
+  const now = beijingDateInfo();
+  return now.hour < 5 ? addDaysToBeijingDate(now.date, -1) : now.date;
+}
+
+function setupEvolutionDateInput(id = "wbEvolutionDate") {
+  const input = $(id);
+  if (!input) return;
+  const current = currentReviewDateString();
+  input.max = current;
+  if (!input.value) input.value = current;
+}
+
+let personaEvolutionConfigSaving = false;
+function isEvolutionConfigSaving(actor = "ai") {
+  return personaEvolutionConfigSaving;
+}
+
+function setEvolutionConfigSaving(actor, saving) {
+  personaEvolutionConfigSaving = saving;
+}
+
+async function persistPersonaEvolutionEnabled(enabled, actor = "ai") {
+  const endpoint = evolutionUi(actor).endpoint;
+  const res = await fetch(`/api/persona-evolution/${endpoint}/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+    keepalive: true
+  });
+  if (res.status === 404 && actor === "ai") {
+    const currentRes = await fetch("/api/worldbook", { cache: "no-store" });
+    const current = await currentRes.json();
+    current.persona_evolution_enabled = enabled;
+    const body = JSON.stringify(current);
+    const saveOpts = {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body
+    };
+    if (body.length < 60000) saveOpts.keepalive = true;
+    const saveRes = await fetch("/api/worldbook", saveOpts);
+    const saveData = await saveRes.json().catch(() => ({}));
+    if (!saveRes.ok || saveData?.ok === false || saveData?.detail) {
+      throw new Error(saveData.message || saveData.detail || "保存失败");
+    }
+    return saveData;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data?.ok === false || data?.detail) {
+    throw new Error(data.message || data.detail || "保存失败");
+  }
+  return data;
+}
+
+async function savePersonaEvolutionToggle(actor = "ai") {
+  if (isEvolutionConfigSaving(actor)) return;
+  const input = $(evolutionUi(actor).toggleId);
+  const enabled = !!input.checked;
+  setEvolutionConfigSaving(actor, true);
+  input.disabled = true;
+  try {
+    await persistPersonaEvolutionEnabled(enabled, actor);
+    showToast(enabled ? "每日复盘已开启" : "每日复盘已关闭");
+  } catch (e) {
+    console.error(e);
+    input.checked = !enabled;
+    showToast(e.message || "开关保存失败");
+  } finally {
+    input.disabled = false;
+    setEvolutionConfigSaving(actor, false);
+  }
+}
+
+async function runPersonaEvolutionTest(actor = "ai") {
+  const ui = evolutionUi(actor);
+  const btn = $(ui.testBtnId);
+  const reviewDate = $(ui.dateId)?.value || currentReviewDateString();
+  btn.disabled = true;
+  btn.textContent = "复盘中";
+  try {
+    const result = await api("POST", `/api/persona-evolution/${ui.endpoint}/run-test`, { date: reviewDate });
+    if (result?.detail) throw new Error(result.detail);
+    setSelectedEvolutionIndex(actor, -1);
+    renderEvolutionResult(result, actor);
+    await loadPersonaEvolutionRuns(actor);
+    if (result?.ok === false) showToast("复盘失败");
+    else showToast("复盘已完成");
+  } catch (e) {
+    console.error(e);
+    renderEvolutionResult({ status: "failed", message: "测试复盘失败", error: e.message || String(e) }, actor);
+    showToast("复盘失败");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "立即复盘";
+  }
+}
+
+async function init() {
+  renderSections("ai", "aiSections", AI_SECTIONS);
+  renderSections("user", "userSections", USER_SECTIONS);
+  setupEvolutionDateInput("wbEvolutionDate");
+  const creativeTextarea = $("wbCreativeRules");
+  creativeTextarea.addEventListener("input", () => {
+    resizeWorldbookTextarea(creativeTextarea);
+    syncPreview();
+  });
+  creativeTextarea.closest(".wb-section")?.addEventListener("toggle", () => resizeWorldbookTextarea(creativeTextarea));
+  window.addEventListener("resize", () => {
+    const activePanel = document.querySelector(".wb-panel.active");
+    if (activePanel) resizeWorldbookTextareas(activePanel);
+  });
+  $("wbSystemPromptEnabled").addEventListener("change", syncPreview);
+  $("wbPersonaEvolutionEnabled").addEventListener("change", () => savePersonaEvolutionToggle("ai"));
+  $("wbAiName").addEventListener("input", syncPreview);
+  $("wbUserName").addEventListener("input", syncPreview);
+
   const wb = await api("GET", "/api/worldbook");
   $("wbAiName").value = wb.ai_name || "";
   $("wbUserName").value = wb.user_name || "";
-  $("wbAiPersona").value = wb.ai_persona || "";
-  $("wbUserPersona").value = wb.user_persona || "";
-  $("wbSystemPrompt").value = wb.system_prompt || "";
   $("wbSystemPromptEnabled").checked = wb.system_prompt_enabled !== false;
-})();
+  $("wbPersonaEvolutionEnabled").checked = !!wb.persona_evolution_enabled;
+
+  const aiSections = normalizeAiSections(wb);
+  const userSections = normalizeUserSections(wb);
+
+  fillSections("ai", AI_SECTIONS, aiSections);
+  fillSections("user", USER_SECTIONS, userSections);
+  creativeTextarea.value = wb.creative_rules || wb.system_prompt || "";
+  resizeWorldbookTextarea(creativeTextarea);
+  syncPreview();
+  await loadPersonaEvolutionRuns("ai");
+}
 
 async function saveWorldBook() {
-  const wb = {
-    ai_name: $("wbAiName").value.trim() || "AI",
-    user_name: $("wbUserName").value.trim() || "你",
-    ai_persona: $("wbAiPersona").value,
-    user_persona: $("wbUserPersona").value,
-    system_prompt: $("wbSystemPrompt").value,
-    system_prompt_enabled: $("wbSystemPromptEnabled").checked
-  };
-  await api("PUT", "/api/worldbook", wb);
-  showToast("✅ 世界书已保存");
+    const saveBtn = $("saveBtn");
+    saveBtn.disabled = true;
+    try {
+      const aiPersona = compileSections("ai", AI_SECTIONS);
+      const userPersona = compileSections("user", USER_SECTIONS);
+    const creativeRules = $("wbCreativeRules").value.trim();
+    const wb = {
+      ai_name: $("wbAiName").value.trim() || "AI",
+      user_name: $("wbUserName").value.trim() || "你",
+      ai_persona: aiPersona,
+      user_persona: userPersona,
+      system_prompt: creativeRules,
+      system_prompt_enabled: $("wbSystemPromptEnabled").checked,
+      persona_schema_version: 1,
+      ai_persona_sections: collectSections("ai", AI_SECTIONS),
+      user_persona_sections: collectSections("user", USER_SECTIONS),
+      creative_rules: creativeRules,
+      persona_section_locks: sectionLocks(),
+      persona_evolution_enabled: $("wbPersonaEvolutionEnabled").checked
+    };
+    await api("PUT", "/api/worldbook", wb);
+    showToast("世界书已保存");
+  } finally {
+    saveBtn.disabled = false;
+  }
 }
+
+init().catch(err => {
+  console.error(err);
+  showToast("世界书加载失败");
+});
 </script>
 </body>
 </html>

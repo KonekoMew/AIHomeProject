@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Any
@@ -48,6 +48,13 @@ from context_builder import (
 from music import search_songs, get_audio_url
 from schedule import process_schedule_commands, get_active_schedules, build_schedule_prompt
 from mcp_client import mcp_manager
+from luckin import (
+    LuckinOrderError,
+    handle_luckin_commands,
+    luckin_ability_text,
+    luckin_payment_attachments,
+    query_luckin_order_detail,
+)
 
 
 def _process_voice_attachments_in_history(history: list, keep_idx: int = -1):
@@ -464,6 +471,10 @@ class MsgCreate(BaseModel):
 class MsgUpdate(BaseModel):
     content: str
 
+class MessageFeedbackUpdate(BaseModel):
+    rating: str
+    reason: str
+
 class MsgEditResend(BaseModel):
     content: str
     context_limit: int = 30
@@ -514,6 +525,17 @@ async def update_conversation(conv_id: str, body: ConvUpdate):
     await manager.broadcast({"type": "conv_updated", "data": {"id": conv_id, **(body.dict(exclude_none=True))}})
     await export_conversation(conv_id)
     return {"ok": True}
+
+
+@router.get("/api/luckin/order/{order_id}")
+async def get_luckin_order_detail(order_id: str):
+    try:
+        return await query_luckin_order_detail(order_id)
+    except LuckinOrderError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @router.delete("/api/conversations/{conv_id}")
 async def delete_conversation(conv_id: str):
@@ -607,6 +629,40 @@ async def toggle_star_message(msg_id: str):
         except: d["attachments"] = []
         await manager.broadcast({"type": "msg_updated", "data": d})
     return {"ok": True, "starred": new_val}
+
+@router.patch("/api/messages/{msg_id}/feedback")
+async def update_message_feedback(msg_id: str, body: MessageFeedbackUpdate):
+    rating = (body.rating or "").strip().lower()
+    reason = (body.reason or "").strip()
+    if rating not in ("like", "dislike"):
+        raise HTTPException(status_code=400, detail="rating must be like or dislike")
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason is required")
+    now = time.time()
+    async with get_db() as db:
+        db.row_factory = __import__('aiosqlite').Row
+        cur = await db.execute("SELECT * FROM messages WHERE id=?", (msg_id,))
+        row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="message not found")
+        if row["role"] != "assistant":
+            raise HTTPException(status_code=400, detail="only assistant messages can be rated")
+        created_at = row["ai_feedback_created_at"] or now
+        await db.execute(
+            "UPDATE messages SET ai_feedback_rating=?, ai_feedback_reason=?, "
+            "ai_feedback_created_at=?, ai_feedback_updated_at=? WHERE id=?",
+            (rating, reason, created_at, now, msg_id),
+        )
+        await db.commit()
+        cur2 = await db.execute("SELECT * FROM messages WHERE id=?", (msg_id,))
+        msg = await cur2.fetchone()
+        d = dict(msg)
+        try:
+            d["attachments"] = json.loads(d.get("attachments") or "[]") if d.get("attachments") else []
+        except:
+            d["attachments"] = []
+        await manager.broadcast({"type": "msg_updated", "data": d})
+    return {"ok": True, "message": d}
 
 @router.get("/api/starred-messages")
 async def list_starred_messages():
@@ -755,6 +811,9 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监控。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。例如检查{user_name}是否去运动了、是否关灯睡觉了，是否工作在摸鱼等，尤其是当{user_name}表示去工作或长时间做事，监督她隔一段时间起来活动一下，或者单纯想主动找她聊天，可以随意使用。日期时间用ISO格式。")
     abilities.append("[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。")
     abilities.append(HOME_ABILITY_TEXT)
+    luckin_text = luckin_ability_text()
+    if luckin_text:
+        abilities.append(luckin_text)
     if is_activity_tracking_enabled():
         abilities.append(f"[查看动态:n] — 查看{user_name}过去n×10分钟的设备使用动态（n为1~12的整数，例如[查看动态:2]查看过去20分钟，[查看动态:6]查看过去1小时）。当你好奇{user_name}最近在干什么、想了解{user_name}的设备使用情况时可以使用。使用后下条消息会收到动态摘要，查看前不要编造内容。")
     try:
@@ -969,8 +1028,9 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 image_gen_prompt = draw_match.group(1).strip()
                 full_text = DRAW_CMD_PATTERN.sub("", full_text).strip()
 
-            full_text = await process_schedule_commands(full_text, conv_id)
+            full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
+            full_text, luckin_results = await handle_luckin_commands(full_text)
 
             moment_matches = MOMENT_CMD_PATTERN.findall(full_text)
             if moment_matches:
@@ -1048,7 +1108,7 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
 
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
             full_text, image_atts = _extract_reply_image_attachments(full_text)
-            reply_atts = _dedupe_attachments(music_atts + image_atts)
+            reply_atts = _dedupe_attachments(music_atts + luckin_payment_attachments(luckin_results) + image_atts)
             att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()
@@ -1246,6 +1306,9 @@ async def send_message(conv_id: str, body: MsgCreate):
     abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监控。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。例如检查{user_name}是否去运动了、是否关灯睡觉了，是否工作在摸鱼等，尤其是当{user_name}表示去工作或长时间做事，监督她隔一段时间起来活动一下，或者单纯想主动找她聊天，可以随意使用。日期时间用ISO格式。")
     abilities.append("[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。")
     abilities.append(HOME_ABILITY_TEXT)
+    luckin_text = luckin_ability_text()
+    if luckin_text:
+        abilities.append(luckin_text)
     # 活动动态查看能力
     if is_activity_tracking_enabled():
         abilities.append(f"[查看动态:n] — 查看{user_name}过去n×10分钟的设备使用动态（n为1~12的整数，例如[查看动态:2]查看过去20分钟，[查看动态:6]查看过去1小时）。当你好奇{user_name}最近在干什么、想了解{user_name}的设备使用情况时可以使用。使用后下条消息会收到动态摘要，查看前不要编造内容。")
@@ -1537,8 +1600,9 @@ async def send_message(conv_id: str, body: MsgCreate):
                 full_text = DRAW_CMD_PATTERN.sub("", full_text).strip()
 
             # 检测日程指令（[ALARM:...], [REMINDER:...], [Monitor:...], [SCHEDULE_DEL:...], [SCHEDULE_LIST]）
-            full_text = await process_schedule_commands(full_text, conv_id)
+            full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
+            full_text, luckin_results = await handle_luckin_commands(full_text)
 
             # 检测 [MOMENT:...] 朋友圈指令
             moment_matches = MOMENT_CMD_PATTERN.findall(full_text)
@@ -1661,7 +1725,7 @@ async def send_message(conv_id: str, body: MsgCreate):
             # 将音乐点歌信息存入 attachments，刷新后可显示胶囊
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
             full_text, image_atts = _extract_reply_image_attachments(full_text)
-            reply_atts = _dedupe_attachments(music_atts + image_atts)
+            reply_atts = _dedupe_attachments(music_atts + luckin_payment_attachments(luckin_results) + image_atts)
             att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()
@@ -2073,6 +2137,13 @@ async def perform_activity_check(conv_id: str, model_key: str, n: int = 6):
     ai_name = wb.get("ai_name", "AI")
     minutes = n * 10
 
+    heart_rate_block = ""
+    try:
+        from health_context import build_heart_rate_prompt_block
+        heart_rate_block = await build_heart_rate_prompt_block(user_name)
+    except Exception:
+        heart_rate_block = ""
+
     prefix = []
     if wb.get("ai_persona"):
         prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
@@ -2112,7 +2183,8 @@ async def perform_activity_check(conv_id: str, model_key: str, n: int = 6):
         f"你刚才想了解{user_name}最近在干什么，以下是系统采集到的{user_name}过去{minutes}分钟的设备使用动态（每10分钟一条摘要）：\n\n"
         f"【设备活动动态】\n{summary_text}"
         f"{user_dynamics_block}\n\n"
-        f"请根据这些动态信息，自然地和{user_name}聊聊。不需要再说\"让我看看\"之类的话，直接根据动态内容回应即可。"
+        f"{heart_rate_block}\n\n"
+        f"请根据这些动态信息、心率摘要和上下文，自然地和{user_name}聊聊。不需要再说\"让我看看\"之类的话，直接根据动态内容回应即可。"
     )
     messages = prefix + recent + [
         {"role": "user", "content": activity_prompt}
@@ -2227,6 +2299,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
     abilities.append(f"[Monitor:YYYY-MM-DDTHH:MM|内容] — 设置定时监控。到时间后系统自动截取摄像头画面发送给你，你可以查看{user_name}的状态。例如检查{user_name}是否去运动了、是否关灯睡觉了，是否工作在摸鱼等，尤其是当{user_name}表示去工作或长时间做事，监督她隔一段时间起来活动一下，或者单纯想主动找她聊天，可以随意使用。日期时间用ISO格式。")
     abilities.append("[SCHEDULE_DEL:日程id] — 删除指定日程/闹铃/定时监控。")
     abilities.append(HOME_ABILITY_TEXT)
+    luckin_text = luckin_ability_text()
+    if luckin_text:
+        abilities.append(luckin_text)
     # 活动动态查看能力
     if is_activity_tracking_enabled():
         abilities.append(f"[查看动态:n] — 查看{user_name}过去n×10分钟的设备使用动态（n为1~12的整数，例如[查看动态:2]查看过去20分钟，[查看动态:6]查看过去1小时）。当你好奇{user_name}最近在干什么、想了解{user_name}的设备使用情况时可以使用。使用后下条消息会收到动态摘要，查看前不要编造内容。")
@@ -2473,8 +2548,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 full_text = DRAW_CMD_PATTERN.sub("", full_text).strip()
 
             # 检测日程指令
-            full_text = await process_schedule_commands(full_text, conv_id)
+            full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
+            full_text, luckin_results = await handle_luckin_commands(full_text)
 
             # 检测 [MOMENT:...] 朋友圈指令
             moment_matches = MOMENT_CMD_PATTERN.findall(full_text)
@@ -2557,7 +2633,7 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
             # 将音乐点歌信息存入 attachments，刷新后可显示胶囊
             music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
             full_text, image_atts = _extract_reply_image_attachments(full_text)
-            reply_atts = _dedupe_attachments(music_atts + image_atts)
+            reply_atts = _dedupe_attachments(music_atts + luckin_payment_attachments(luckin_results) + image_atts)
             att_json = json.dumps(reply_atts, ensure_ascii=False) if reply_atts else ""
 
             now2 = time.time()

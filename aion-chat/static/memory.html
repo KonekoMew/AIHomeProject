@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>记忆库 - Aion</title>
+<title>记忆库</title>
 <link rel="stylesheet" href="/static/common.css">
 <link rel="manifest" href="/manifest.json">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -13,7 +13,10 @@
 .mem-list { flex:1; overflow-y:auto; max-height:calc(100dvh - 320px); border:1px solid var(--border); border-radius:8px; background:var(--bg); padding:4px; }
 .mem-entry { padding:8px 10px; border-bottom:1px solid var(--border); font-size:13px; line-height:1.5; display:flex; align-items:flex-start; gap:8px; }
 .mem-entry:last-child { border-bottom:none; }
+.mem-entry.mem-return-focus { background:rgba(74,144,226,0.12); }
 .mem-type { font-size:10px; padding:2px 6px; border-radius:4px; background:var(--surface2); color:var(--accent); white-space:nowrap; flex-shrink:0; margin-top:2px; }
+.mem-type.kind-daily { color:#2e7d32; }
+.mem-type.kind-long-term { color:#c45a24; }
 .mem-left { display:flex; flex-direction:column; align-items:center; gap:3px; flex-shrink:0; margin-top:2px; }
 .mem-imp { font-size:10px; color:var(--text3); font-weight:600; }
 .mem-meta { display:flex; align-items:center; gap:6px; margin-top:3px; flex-wrap:wrap; }
@@ -40,6 +43,24 @@
 .digest-status.success { background:#e8f5e9; color:#2e7d32; }
 .digest-status.info { background:#e3f2fd; color:#1565c0; }
 .digest-status.error { background:#fce4ec; color:#c62828; }
+.compress-review { margin-top:8px; border:1px solid var(--border); border-radius:8px; background:var(--surface); padding:10px; font-size:12px; line-height:1.45; }
+.compress-review-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
+.compress-review-title { font-weight:700; color:var(--text); }
+.compress-review-status { color:var(--text3); font-size:11px; }
+.compress-review-stats { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0; }
+.compress-review-stats span { background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:2px 6px; color:var(--text2); }
+.compress-review-msg { color:var(--text2); white-space:pre-wrap; margin:6px 0; }
+.compress-review details { border-top:1px solid var(--border); padding-top:6px; margin-top:6px; }
+.compress-review summary { cursor:pointer; color:var(--accent); font-weight:600; }
+.compress-item { padding:6px 0; border-bottom:1px solid var(--border); }
+.compress-item:last-child { border-bottom:none; }
+.compress-item-meta { display:flex; gap:6px; flex-wrap:wrap; color:var(--text3); font-size:10px; margin-top:3px; }
+.compress-item-reason { color:var(--text3); font-size:11px; margin-top:3px; }
+.compress-review-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:10px; }
+.compress-review-actions button { border:none; border-radius:5px; padding:5px 12px; font-size:12px; cursor:pointer; font-weight:600; }
+.compress-discard-btn { background:var(--surface2); color:var(--text2); border:1px solid var(--border) !important; }
+.compress-apply-btn { background:#2e7d32; color:#fff; }
+.compress-review-actions button:disabled { opacity:0.55; cursor:not-allowed; }
 .mem-source-btn { background:none; border:none; cursor:pointer; font-size:12px; padding:2px; opacity:0.6; color:var(--accent); }
 .mem-source-btn:hover { opacity:1; }
 .anchor-row { display:flex; align-items:center; gap:8px; margin-top:8px; padding:6px 0; border-top:1px solid var(--border); font-size:12px; }
@@ -78,6 +99,7 @@
 .editing-focus .mem-add-row,
 .editing-focus .anchor-row,
 .editing-focus .digest-status,
+.editing-focus .compress-review,
 .editing-focus .btn-row,
 .editing-focus .top-bar { display:none !important; }
 .editing-focus .mem-list { max-height:none; border:none; overflow:visible; }
@@ -115,9 +137,11 @@
     </div>
     <div class="digest-status" id="digestStatus" style="display:none"></div>
     <div class="btn-row">
+      <button class="btn-digest" id="compressDailyBtn" onclick="compressDailyMemories()" style="background:#6a4c93">🗜️ 生成压缩草稿</button>
       <button class="btn-digest" id="digestBtn" onclick="triggerDigest()">📝 总结新记忆</button>
       <button class="btn-digest" id="rebuildBtn" onclick="rebuildEmbeddings()" style="background:#1565c0">🔄 重建向量索引</button>
     </div>
+    <div class="compress-review" id="compressReview" style="display:none"></div>
   </div>
 </div>
 
@@ -137,15 +161,33 @@
   </div>
 </div>
 
+<script src="/static/theme.js?v=theme-20260606"></script>
 <script src="/static/common.js"></script>
 <script>
 const MEM_TYPE_LABELS = {
   shared_moment:"共同经历", emotion:"情感时刻", life_event:"重要事件",
-  preference:"喜好/雷区", promise:"约定承诺", milestone:"关系里程碑", event:"事件", digest:"总结"
+  preference:"喜好/雷区", promise:"约定承诺", milestone:"关系里程碑",
+  event:"事件", digest:"日常总结", seeky_digest:"日常整理",
+  seeky_compressed:"日常压缩", daily:"日常", important:"长期重要"
 };
+const SUMMARY_MEMORY_TYPES = new Set(["digest", "seeky_digest", "seeky_compressed", "daily"]);
 let _allMemories = [];
 let _sourceMemId = null;
 let _sourceMessages = [];
+let _dailyCompressReview = null;
+
+function memoryKind(m) {
+  return m.memory_kind || (SUMMARY_MEMORY_TYPES.has(String(m.type || '').toLowerCase()) ? 'daily' : 'long_term');
+}
+function memoryKindLabel(m) {
+  return m.memory_kind_label || (memoryKind(m) === 'daily' ? '日常' : '长期重要');
+}
+function typeForMemoryKind(currentType, selectedKind) {
+  const current = String(currentType || '').toLowerCase();
+  const isDaily = SUMMARY_MEMORY_TYPES.has(current);
+  if (selectedKind === 'daily') return isDaily ? (currentType || 'daily') : 'daily';
+  return isDaily ? 'important' : (currentType || 'important');
+}
 
 connectCommonWS(msg => {
   if (msg.type === "memory_added") {
@@ -157,6 +199,7 @@ connectCommonWS(msg => {
 (async function init() {
   await loadMemories();
   loadAnchor();
+  loadCompressionDraft();
 })();
 
 async function loadMemories() {
@@ -173,13 +216,19 @@ function filterMemories() { renderMemories(); }
 function renderMemories() {
   const query = ($("memSearch").value || "").toLowerCase();
   const filtered = query
-    ? _allMemories.filter(m => m.content.toLowerCase().includes(query) || (MEM_TYPE_LABELS[m.type]||"").includes(query))
+    ? _allMemories.filter(m => (
+        m.content.toLowerCase().includes(query) ||
+        (MEM_TYPE_LABELS[m.type]||"").includes(query) ||
+        memoryKindLabel(m).includes(query)
+      ))
     : _allMemories;
   $("memCount").textContent = `共 ${_allMemories.length} 条记忆` + (query ? `，筛选出 ${filtered.length} 条` : "");
   const el = $("memList");
   if (!filtered.length) { el.innerHTML = '<div class="mem-empty">暂无记忆</div>'; return; }
   el.innerHTML = filtered.map(m => {
     const typeLabel = MEM_TYPE_LABELS[m.type] || m.type;
+    const kindLabel = memoryKindLabel(m);
+    const kindClass = memoryKind(m) === 'daily' ? 'kind-daily' : 'kind-long-term';
     const timeStr = m.created_at ? new Date(m.created_at * 1000).toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}) : "";
     const hasSource = Number(m.source_count || 0) > 0;
     const sourceBtn = hasSource ? `<button class="mem-source-btn" onclick="viewSource('${escHtml(m.id)}')" title="查看原文">📜</button>` : '';
@@ -191,7 +240,7 @@ function renderMemories() {
     const impDisplay = m.importance != null ? `<span class="mem-imp" title="重要度">${Number(m.importance).toFixed(1)}</span>` : '';
     const pinClass = m.unresolved ? 'mem-pin active' : 'mem-pin';
     return `<div class="mem-entry${m.unresolved ? ' mem-unresolved' : ''}" data-id="${escHtml(m.id)}">
-      <div class="mem-left"><span class="mem-type">${escHtml(typeLabel)}</span>${impDisplay}</div>
+      <div class="mem-left"><span class="mem-type ${kindClass}" title="${escHtml(typeLabel)}">${escHtml(kindLabel)}</span>${impDisplay}</div>
       <div style="flex:1;min-width:0">
         <div class="mem-content" id="mc_${escHtml(m.id)}">${escHtml(m.content)}</div>
         <div class="mem-meta">${kwDisplay}<span class="mem-time">${escHtml(timeStr)}</span></div>
@@ -206,6 +255,18 @@ function renderMemories() {
   }).join("");
 }
 
+function restoreMemoryPosition(id) {
+  requestAnimationFrame(() => {
+    const list = $("memList");
+    const entry = list ? Array.from(list.querySelectorAll(".mem-entry")).find(el => el.dataset.id === id) : null;
+    if (!list || !entry) return;
+    const targetTop = Math.max(0, entry.offsetTop - Math.max(0, (list.clientHeight - entry.clientHeight) / 2));
+    list.scrollTo({ top: targetTop, behavior: "auto" });
+    entry.classList.add("mem-return-focus");
+    setTimeout(() => entry.classList.remove("mem-return-focus"), 1200);
+  });
+}
+
 function editMemory(id) {
   const mem = _allMemories.find(m => m.id === id);
   if (!mem) return;
@@ -218,7 +279,7 @@ function editMemory(id) {
   document.querySelector('.sub-page').classList.add('editing-focus');
   entry.classList.add('mem-editing');
   const curType = mem.type || 'event';
-  const typeOptions = Object.entries(MEM_TYPE_LABELS).map(([k,v]) => `<option value="${k}"${k === curType ? ' selected' : ''}>${v}</option>`).join('');
+  const curKind = memoryKind(mem);
   entry.innerHTML = `
     <div style="flex:1;display:flex;flex-direction:column;gap:8px;padding:4px 0">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -227,8 +288,11 @@ function editMemory(id) {
       </div>
       <textarea class="mem-content-edit" id="me_${escHtml(id)}">${escHtml(mem.content)}</textarea>
       <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-        <label style="font-size:11px;color:var(--text2)">标签:</label>
-        <select id="mt_${escHtml(id)}" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px;outline:none">${typeOptions}</select>
+        <label style="font-size:11px;color:var(--text2)">记忆标签:</label>
+        <select id="mg_${escHtml(id)}" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px;outline:none">
+          <option value="long_term"${curKind === 'long_term' ? ' selected' : ''}>长期重要</option>
+          <option value="daily"${curKind === 'daily' ? ' selected' : ''}>日常</option>
+        </select>
         <label style="font-size:11px;color:var(--text2)">关键词:</label>
         <input type="text" id="mk_${escHtml(id)}" value="${escHtml(kws)}" placeholder="逗号分隔" style="flex:1;min-width:120px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px;outline:none">
         <label style="font-size:11px;color:var(--text2)">重要度:</label>
@@ -256,20 +320,29 @@ async function saveMemoryEdit(id) {
   if (!newContent) return;
   const kwEl = document.getElementById("mk_" + id);
   const impEl = document.getElementById("mi_" + id);
-  const typeEl = document.getElementById("mt_" + id);
+  const kindEl = document.getElementById("mg_" + id);
   const kwStr = kwEl ? kwEl.value.trim() : '';
   const kwArr = kwStr ? kwStr.split(/[,，]/).map(s => s.trim()).filter(Boolean) : [];
   const imp = impEl ? parseFloat(impEl.value) : null;
-  const newType = typeEl ? typeEl.value : null;
+  const mem = _allMemories.find(m => m.id === id);
+  const selectedKind = kindEl ? kindEl.value : memoryKind(mem || {});
+  const newType = typeForMemoryKind(mem?.type, selectedKind);
   const body = { content: newContent, keywords: JSON.stringify(kwArr) };
   if (newType) body.type = newType;
   if (imp != null && !isNaN(imp)) body.importance = Math.max(0, Math.min(1, imp));
   try {
     await api("PUT", `/api/memories/${id}`, body);
-    const mem = _allMemories.find(m => m.id === id);
-    if (mem) { mem.content = newContent; mem.keywords = body.keywords; if (newType) mem.type = newType; if (body.importance != null) mem.importance = body.importance; }
+    if (mem) {
+      mem.content = newContent;
+      mem.keywords = body.keywords;
+      if (newType) mem.type = newType;
+      mem.memory_kind = selectedKind;
+      mem.memory_kind_label = selectedKind === 'daily' ? '日常' : '长期重要';
+      if (body.importance != null) mem.importance = body.importance;
+    }
     document.querySelector('.sub-page').classList.remove('editing-focus');
     renderMemories();
+    restoreMemoryPosition(id);
   } catch(e) { alert("保存失败"); }
 }
 
@@ -329,6 +402,201 @@ async function triggerDigest() {
     btn.disabled = false;
     btn.textContent = "📝 总结新记忆";
     setTimeout(() => { statusEl.style.display = "none"; }, 5000);
+  }
+}
+
+async function compressDailyMemories() {
+  const btn = $("compressDailyBtn");
+  const statusEl = $("digestStatus");
+  if (_dailyCompressReview && _dailyCompressReview.status === 'draft') {
+    renderDailyCompressionReview();
+    statusEl.style.display = "block";
+    statusEl.className = "digest-status info";
+    statusEl.textContent = "已经有一份压缩草稿，先确认应用或废弃它。";
+    return;
+  }
+  if (!confirm("将为主记忆库中超过 14 天的日常记忆生成压缩草稿；这一步不会修改记忆库。继续？")) return;
+  btn.disabled = true;
+  btn.textContent = "生成中...";
+  statusEl.style.display = "block";
+  statusEl.className = "digest-status info";
+  statusEl.textContent = "正在让当前主模型整理主记忆库的旧日常记忆草稿，请稍候...";
+  try {
+    const result = await api("POST", "/api/memories/compress-daily", { target: "main", days: 14 });
+    _dailyCompressReview = result.review || null;
+    renderDailyCompressionReview();
+    const counts = _dailyCompressReview?.counts || {};
+    const errors = (counts.total?.errors || []).filter(Boolean);
+    statusEl.className = errors.length ? "digest-status error" : "digest-status success";
+    statusEl.textContent = result.message || "压缩草稿已生成";
+  } catch(e) {
+    statusEl.className = "digest-status error";
+    statusEl.textContent = "生成压缩草稿失败：" + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🗜️ 生成压缩草稿";
+  }
+}
+
+async function loadCompressionDraft() {
+  try {
+    const result = await api("GET", "/api/memories/compress-daily/latest?target=main");
+    _dailyCompressReview = result.review || null;
+    renderDailyCompressionReview();
+  } catch(e) {
+    _dailyCompressReview = null;
+  }
+}
+
+function flattenDraftBatches(key, field) {
+  return ((_dailyCompressReview?.payload?.[key]?.batches) || []).flatMap(batch => batch[field] || []);
+}
+
+function oldRowsForDraft(key) {
+  return ((_dailyCompressReview?.counts?.[key]?.old_rows) || []);
+}
+
+function fmtDraftTime(ts) {
+  if (!ts) return "";
+  const d = new Date(Number(ts) * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("zh-CN", {month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"});
+}
+
+function renderCompressItem(item, kindLabel) {
+  const kws = Array.isArray(item.keywords) ? item.keywords : parseKeywordText(item.keywords);
+  const sourceCount = (item.source_memory_ids || []).length;
+  return `<div class="compress-item">
+    <div>${escHtml(item.content || "")}</div>
+    <div class="compress-item-meta">
+      <span>${escHtml(kindLabel)}</span>
+      <span>${escHtml(fmtDraftTime(item.memory_time || item.source_start_ts))}</span>
+      <span>来源 ${sourceCount} 条日常</span>
+      <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
+      ${kws.length ? `<span>${kws.map(k => escHtml(k)).join(" · ")}</span>` : ""}
+    </div>
+    ${item.reason ? `<div class="compress-item-reason">${escHtml(item.reason)}</div>` : ""}
+  </div>`;
+}
+
+function renderOldCompressItem(item) {
+  return `<div class="compress-item">
+    <div>${escHtml(item.content || "")}</div>
+    <div class="compress-item-meta">
+      <span>${escHtml(fmtDraftTime(item.source_start_ts || item.created_at))}</span>
+      <span>重要度 ${Number(item.importance || 0).toFixed(2)}</span>
+    </div>
+  </div>`;
+}
+
+function parseKeywordText(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch(e) {
+    return String(value).split(/[,，、\n]/).map(s => s.trim()).filter(Boolean);
+  }
+}
+
+function renderDailyCompressionReview() {
+  const el = $("compressReview");
+  if (!_dailyCompressReview || !['draft', 'failed'].includes(_dailyCompressReview.status)) {
+    el.style.display = "none";
+    el.innerHTML = "";
+    return;
+  }
+  const counts = _dailyCompressReview.counts || {};
+  const total = counts.total || {};
+  const mainDaily = flattenDraftBatches("main", "compressed_daily");
+  const mainImportant = flattenDraftBatches("main", "important_memories");
+  const chatDaily = flattenDraftBatches("chatroom", "compressed_daily");
+  const chatImportant = flattenDraftBatches("chatroom", "important_memories");
+  const dailyItems = [...mainDaily.map(item => ({...item, area:"主记忆"})), ...chatDaily.map(item => ({...item, area:"聊天室"}))];
+  const importantItems = [...mainImportant.map(item => ({...item, area:"主记忆"})), ...chatImportant.map(item => ({...item, area:"聊天室"}))];
+  const oldRows = [...oldRowsForDraft("main"), ...oldRowsForDraft("chatroom")];
+  const messages = [...(counts.main?.messages || []), ...(counts.chatroom?.messages || [])].filter(Boolean);
+  const errors = total.errors || [];
+  const canApply = _dailyCompressReview.status === 'draft' && (dailyItems.length || importantItems.length || Number(total.processed || 0));
+  el.style.display = "block";
+  el.innerHTML = `
+    <div class="compress-review-head">
+      <div class="compress-review-title">主记忆压缩草稿</div>
+      <div class="compress-review-status">${escHtml(_dailyCompressReview.status === 'draft' ? '待确认' : '生成失败')}</div>
+    </div>
+    <div class="compress-review-stats">
+      <span>候选 ${Number(_dailyCompressReview.candidate_count || 0)}</span>
+      <span>拟移除 ${Number(total.processed || 0)}</span>
+      <span>新日常 ${Number(total.created_daily || 0)}</span>
+      <span>新长期重要 ${Number(total.created_important || 0)}</span>
+    </div>
+    ${messages.length ? `<div class="compress-review-msg">${escHtml(messages.join("\n"))}</div>` : ""}
+    ${errors.length ? `<div class="compress-review-msg" style="color:#c62828">${escHtml(errors.join("\n"))}</div>` : ""}
+    <details open>
+      <summary>新日常 ${dailyItems.length}</summary>
+      ${dailyItems.length ? dailyItems.map(item => renderCompressItem(item, `${item.area} · 日常`)).join("") : '<div class="mem-empty">没有新日常</div>'}
+    </details>
+    <details ${importantItems.length ? "open" : ""}>
+      <summary>新长期重要 ${importantItems.length}</summary>
+      ${importantItems.length ? importantItems.map(item => renderCompressItem(item, `${item.area} · 长期重要`)).join("") : '<div class="mem-empty">没有新长期重要</div>'}
+    </details>
+    <details>
+      <summary>将移除的旧日常 ${oldRows.length}</summary>
+      ${oldRows.length ? oldRows.slice(0, 120).map(renderOldCompressItem).join("") : '<div class="mem-empty">没有旧日常会被移除</div>'}
+    </details>
+    <div class="compress-review-actions">
+      <button class="compress-discard-btn" onclick="discardDailyCompressionDraft('${escHtml(_dailyCompressReview.id)}')">废弃草稿</button>
+      <button class="compress-apply-btn" onclick="applyDailyCompressionDraft('${escHtml(_dailyCompressReview.id)}')" ${canApply ? "" : "disabled"}>确认应用</button>
+    </div>`;
+}
+
+function setCompressionReviewBusy(value) {
+  document.querySelectorAll(".compress-review-actions button").forEach(btn => btn.disabled = value);
+}
+
+async function applyDailyCompressionDraft(reviewId) {
+  if (!reviewId) return;
+  const total = _dailyCompressReview?.counts?.total || {};
+  if (!confirm(`确认应用这份压缩草稿？将移除旧日常 ${Number(total.processed || 0)} 条，并写入新日常 ${Number(total.created_daily || 0)} 条、新长期重要 ${Number(total.created_important || 0)} 条。`)) return;
+  const statusEl = $("digestStatus");
+  setCompressionReviewBusy(true);
+  statusEl.style.display = "block";
+  statusEl.className = "digest-status info";
+  statusEl.textContent = "正在应用压缩草稿并重算向量...";
+  try {
+    const result = await api("POST", `/api/memories/compress-daily/${reviewId}/apply`);
+    if (!result.ok) throw new Error(result.message || "应用失败");
+    _dailyCompressReview = null;
+    renderDailyCompressionReview();
+    await loadMemories();
+    statusEl.className = "digest-status success";
+    statusEl.textContent = result.message || "压缩草稿已应用";
+  } catch(e) {
+    statusEl.className = "digest-status error";
+    statusEl.textContent = "应用压缩草稿失败：" + (e.message || "未知错误");
+    setCompressionReviewBusy(false);
+  }
+}
+
+async function discardDailyCompressionDraft(reviewId) {
+  if (!reviewId) return;
+  if (!confirm("确定废弃这份压缩草稿？")) return;
+  const statusEl = $("digestStatus");
+  setCompressionReviewBusy(true);
+  try {
+    const result = await api("POST", `/api/memories/compress-daily/${reviewId}/discard`);
+    if (!result.ok) throw new Error(result.message || "废弃失败");
+    _dailyCompressReview = null;
+    renderDailyCompressionReview();
+    statusEl.style.display = "block";
+    statusEl.className = "digest-status info";
+    statusEl.textContent = result.message || "压缩草稿已废弃";
+  } catch(e) {
+    statusEl.style.display = "block";
+    statusEl.className = "digest-status error";
+    statusEl.textContent = "废弃压缩草稿失败：" + (e.message || "未知错误");
+    setCompressionReviewBusy(false);
   }
 }
 

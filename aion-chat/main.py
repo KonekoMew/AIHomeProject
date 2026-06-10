@@ -54,11 +54,13 @@ from routes import health as health_routes
 from routes import phone_screen as phone_screen_routes
 from routes import search as search_routes
 from routes import autonomy as autonomy_routes
+from routes import persona_evolution as persona_evolution_routes
 from activity import pc_tracker, pc_display_tracker
 from memory import auto_digest
 from chatroom import _connor_1v1_auto_digest_loop
 from fund import fund_scheduler
 from autonomy import idle_autonomy_mgr
+from persona_evolution import main_ai_persona_evolution_loop, connor_persona_evolution_loop
 
 
 # ── 自动记忆总结定时任务 ──────────────────────────
@@ -136,9 +138,13 @@ async def lifespan(app: FastAPI):
     # 自动记忆总结定时任务
     digest_task = asyncio.create_task(_auto_digest_loop())
     cr_digest_task = asyncio.create_task(_connor_1v1_auto_digest_loop())
+    persona_evolution_task = asyncio.create_task(main_ai_persona_evolution_loop())
+    connor_persona_evolution_task = asyncio.create_task(connor_persona_evolution_loop())
     idle_autonomy_mgr.start()
     yield
     idle_autonomy_mgr.stop()
+    connor_persona_evolution_task.cancel()
+    persona_evolution_task.cancel()
     cr_digest_task.cancel()
     digest_task.cancel()
     fund_scheduler.stop()
@@ -210,6 +216,7 @@ app.include_router(health_routes.router)
 app.include_router(phone_screen_routes.router)
 app.include_router(search_routes.router)
 app.include_router(autonomy_routes.router)
+app.include_router(persona_evolution_routes.router)
 
 
 # 页面
@@ -223,35 +230,35 @@ async def chat_page():
 
 @app.get("/settings")
 async def settings_page():
-    return FileResponse(BASE_DIR / "static" / "settings.html")
+    return FileResponse(BASE_DIR / "static" / "settings.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/worldbook")
 async def worldbook_page():
-    return FileResponse(BASE_DIR / "static" / "worldbook.html")
+    return FileResponse(BASE_DIR / "static" / "worldbook.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/memory")
 async def memory_page():
-    return FileResponse(BASE_DIR / "static" / "memory.html")
+    return FileResponse(BASE_DIR / "static" / "memory.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/schedule")
 async def schedule_page():
-    return FileResponse(BASE_DIR / "static" / "schedule.html")
+    return FileResponse(BASE_DIR / "static" / "schedule.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/camera")
 async def camera_page():
-    return FileResponse(BASE_DIR / "static" / "camera.html")
+    return FileResponse(BASE_DIR / "static" / "camera.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/monitor-logs")
 async def monitor_logs_page():
-    return FileResponse(BASE_DIR / "static" / "monitor-logs.html")
+    return FileResponse(BASE_DIR / "static" / "monitor-logs.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/location")
 async def location_page():
-    return FileResponse(BASE_DIR / "static" / "location.html")
+    return FileResponse(BASE_DIR / "static" / "location.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/heart-whispers")
 async def heart_whispers_page():
-    return FileResponse(BASE_DIR / "static" / "heart-whispers.html")
+    return FileResponse(BASE_DIR / "static" / "heart-whispers.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/moments")
 async def moments_page():
@@ -263,11 +270,11 @@ async def diary_page():
 
 @app.get("/activity-logs")
 async def activity_logs_page():
-    return FileResponse(BASE_DIR / "static" / "activity-logs.html")
+    return FileResponse(BASE_DIR / "static" / "activity-logs.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/reading")
 async def reading_page():
-    return FileResponse(BASE_DIR / "static" / "reading.html")
+    return FileResponse(BASE_DIR / "static" / "reading.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 @app.get("/theater")
 async def theater_page():

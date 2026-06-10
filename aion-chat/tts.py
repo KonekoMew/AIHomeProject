@@ -14,6 +14,15 @@ from config import get_key, TTS_CACHE_DIR, TTS_CACHE_MAX_BYTES
 log = logging.getLogger("tts")
 
 
+def _log_background_tts_failure(task: asyncio.Task):
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log.warning("background TTS synthesis failed: %s", e)
+
+
 def cleanup_tts_cache_dir(cache_dir: Path = TTS_CACHE_DIR, max_bytes: int = TTS_CACHE_MAX_BYTES, *, skip: set[Path] | None = None):
     """Delete oldest cached MP3 files until the directory is under max_bytes."""
     skip_resolved = {p.resolve() for p in (skip or set())}
@@ -52,6 +61,7 @@ _STRIP_PATTERNS = [
     re.compile(r'\[Monitor:[^\]]*\]'),
     re.compile(r'\[SCHEDULE_DEL:[^\]]*\]'),
     re.compile(r'\[SCHEDULE_LIST\]'),
+    re.compile(r'\[LUCKIN:[^\]]*\]', re.IGNORECASE),
     re.compile(r'\[TOY:[^\]]*\]'),
     re.compile(r'\[MOMENT:[^\]]*\]'),
     re.compile(r'\[MEMORY:[^\]]*\]'),
@@ -85,6 +95,192 @@ def _has_unclosed_tag(text: str) -> bool:
     if meta_opens > meta_closes:
         return True
     return False
+
+
+def _find_cut_position_for_text(buffer: str, min_chars: int, max_chars: int) -> int | None:
+    clean_count = 0
+    in_bracket = False
+    in_meta = False
+    best_comma_cut = None
+
+    i = 0
+    while i < len(buffer):
+        ch = buffer[i]
+
+        if ch == '[' and not in_meta:
+            in_bracket = True
+        elif ch == ']' and in_bracket:
+            in_bracket = False
+            i += 1
+            continue
+        elif buffer[i:i+6] == '<meta>':
+            in_meta = True
+            i += 6
+            continue
+        elif buffer[i:i+7] == '</meta>':
+            in_meta = False
+            i += 7
+            continue
+
+        if in_bracket or in_meta:
+            i += 1
+            continue
+
+        clean_count += 1
+
+        if clean_count >= min_chars:
+            if ch in _SENTENCE_ENDS:
+                return i
+            if ch in _COMMA_CHARS:
+                best_comma_cut = i
+
+        if clean_count >= max_chars:
+            if best_comma_cut is not None:
+                return best_comma_cut
+            return i
+
+        i += 1
+
+    return None
+
+
+def split_text_for_tts(text: str, *, min_chars: int = 300, max_chars: int = 500) -> list[str]:
+    """Split long text into TTS-sized chunks, preferring sentence boundaries."""
+    remaining = (text or "").strip()
+    segments: list[str] = []
+    min_chars = max(1, min_chars)
+    max_chars = max(min_chars, max_chars)
+
+    while remaining:
+        cleaned = _strip_tags(remaining).strip()
+        if not cleaned:
+            break
+        if len(cleaned) <= max_chars:
+            segments.append(cleaned)
+            break
+        if _has_unclosed_tag(remaining):
+            segments.append(cleaned)
+            break
+
+        cut_pos = _find_cut_position_for_text(remaining, min_chars, max_chars)
+        if cut_pos is None:
+            cut_pos = min(len(remaining), max_chars) - 1
+
+        part = _strip_tags(remaining[:cut_pos + 1]).strip()
+        remaining = remaining[cut_pos + 1:].strip()
+        if part:
+            segments.append(part)
+
+    return segments
+
+
+async def _request_tts_audio(text: str, voice: str, *, seq: int | None = None) -> bytes | None:
+    key = get_key("siliconflow")
+    if not key:
+        log.warning("TTS: 无硅基流动 API Key，跳过合成 seq=%s", seq)
+        return None
+
+    resp = None
+    for attempt in range(3):
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.siliconflow.cn/v1/audio/speech",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={
+                    "model": "FunAudioLLM/CosyVoice2-0.5B",
+                    "input": text,
+                    "voice": voice,
+                    "response_format": "mp3",
+                    "speed": 1.0,
+                    "gain": 0
+                }
+            )
+        if resp.status_code == 200:
+            return resp.content
+        log.warning("TTS API 错误: status=%d seq=%s attempt=%d", resp.status_code, seq, attempt + 1)
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return None
+
+
+async def synthesize_text_to_mp3(
+    text: str,
+    voice: str,
+    output_path: Path,
+    *,
+    min_chars: int = 300,
+    max_chars: int = 500,
+    concurrency: int = 2,
+    segment_prefix: str | None = None,
+    cleanup_segments: bool = True,
+) -> dict:
+    """Synthesize long text into one MP3 file by chunking and merging segments."""
+    segments = split_text_for_tts(text, min_chars=min_chars, max_chars=max_chars)
+    if not segments:
+        raise ValueError("TTS text is empty")
+    if not voice:
+        raise ValueError("TTS voice is empty")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = re.sub(r'[^a-zA-Z0-9_\-]', '', segment_prefix or output_path.stem) or "tts"
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+    created_paths: list[Path] = []
+
+    async def _synthesize_segment(seq: int, segment: str) -> Path:
+        async with semaphore:
+            audio_data = await _request_tts_audio(segment, voice, seq=seq)
+            if not audio_data:
+                raise RuntimeError(f"TTS segment {seq} failed")
+            path = output_path.parent / f"{prefix}_s{seq}.mp3"
+            path.write_bytes(audio_data)
+            created_paths.append(path)
+            return path
+
+    results = await asyncio.gather(
+        *[_synthesize_segment(seq, segment) for seq, segment in enumerate(segments)],
+        return_exceptions=True,
+    )
+    failures = [item for item in results if isinstance(item, Exception)]
+    paths = [item for item in results if isinstance(item, Path)]
+    if failures:
+        for path in created_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise RuntimeError(f"TTS failed for {len(failures)} segment(s)") from failures[0]
+
+    try:
+        await asyncio.to_thread(TTSStreamer._merge_mp3_files, paths, output_path)
+    finally:
+        if cleanup_segments:
+            for path in created_paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as e:
+                    log.warning("TTS segment cleanup failed for %s: %s", path, e)
+
+    log.info("TTS long text merged: path=%s segments=%d", output_path.name, len(paths))
+    return {"segments": len(paths), "chars": len(_strip_tags(text))}
+
+
+async def synthesize_message_tts(msg_id: str, text: str, voice: str, ws_manager=None):
+    """Synthesize an already-complete message and push normal tts_chunk events."""
+    text = (text or "").strip()
+    if not msg_id or not text or not voice:
+        return
+    streamer = TTSStreamer(msg_id, voice, ws_manager)
+    streamer.feed(text)
+    await streamer.flush()
+
+
+def synthesize_message_tts_later(msg_id: str, text: str, voice: str, ws_manager=None):
+    """Fire-and-forget TTS for messages created outside the normal streaming path."""
+    text = (text or "").strip()
+    if not msg_id or not text or not voice:
+        return None
+    task = asyncio.create_task(synthesize_message_tts(msg_id, text, voice, ws_manager))
+    task.add_done_callback(_log_background_tts_failure)
+    return task
 
 
 class TTSStreamer:
@@ -163,57 +359,7 @@ class TTSStreamer:
         逻辑：纯文本到达 min_chars 后，开始找句号；最远到 max_chars，找逗号；还没有就强切。
         返回原始 buffer 中的切分索引。
         """
-        clean_count = 0     # 已累积的纯文字数
-        in_bracket = False   # 在 [...] 内
-        in_meta = False      # 在 <meta>...</meta> 内
-        best_sentence_cut = None
-        best_comma_cut = None
-
-        i = 0
-        while i < len(self._buffer):
-            ch = self._buffer[i]
-
-            # 跟踪标签状态
-            if ch == '[' and not in_meta:
-                in_bracket = True
-            elif ch == ']' and in_bracket:
-                in_bracket = False
-                i += 1
-                continue
-            elif self._buffer[i:i+6] == '<meta>':
-                in_meta = True
-                i += 6
-                continue
-            elif self._buffer[i:i+7] == '</meta>':
-                in_meta = False
-                i += 7
-                continue
-
-            if in_bracket or in_meta:
-                i += 1
-                continue
-
-            # 计数纯文字
-            clean_count += 1
-
-            if clean_count >= self._min_chars:
-                if ch in _SENTENCE_ENDS:
-                    # 找到句子结束符，检查省略号（…或...连续的情况）
-                    best_sentence_cut = i
-                    # 立即用这个切分点
-                    return best_sentence_cut
-                if ch in _COMMA_CHARS:
-                    best_comma_cut = i
-
-            if clean_count >= self._max_chars:
-                # 到达上限，优先逗号，否则强切当前位置
-                if best_comma_cut is not None:
-                    return best_comma_cut
-                return i
-
-            i += 1
-
-        return None
+        return _find_cut_position_for_text(self._buffer, self._min_chars, self._max_chars)
 
     def _dispatch(self, text: str):
         """发起异步合成任务"""
@@ -291,37 +437,14 @@ class TTSStreamer:
 
     async def _synthesize(self, text: str, seq: int, safe_id: str):
         """调用硅基流动 TTS 合成 → 保存文件 → WS 推送"""
-        key = get_key("siliconflow")
-        if not key:
-            log.warning("TTS: 无硅基流动 API Key，跳过合成 seq=%d", seq)
-            return
-
         chunk_name = f"{safe_id}_s{seq}"
         try:
-            resp = None
-            for attempt in range(3):
-                async with httpx.AsyncClient(timeout=30) as client:
-                    resp = await client.post(
-                        "https://api.siliconflow.cn/v1/audio/speech",
-                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                        json={
-                            "model": "FunAudioLLM/CosyVoice2-0.5B",
-                            "input": text,
-                            "voice": self.voice,
-                            "response_format": "mp3",
-                            "speed": 1.0,
-                            "gain": 0
-                        }
-                    )
-                if resp.status_code == 200:
-                    break
-                log.warning("TTS API 错误: status=%d seq=%d attempt=%d", resp.status_code, seq, attempt + 1)
-                await asyncio.sleep(0.5 * (attempt + 1))
-            if not resp or resp.status_code != 200:
+            audio_data = await _request_tts_audio(text, self.voice, seq=seq)
+            if not audio_data:
                 return
 
             cache_path = self._cache_dir / f"{chunk_name}.mp3"
-            cache_path.write_bytes(resp.content)
+            cache_path.write_bytes(audio_data)
             self._segment_paths[seq] = cache_path
             if self._cache_max_bytes and self._cache_dir.resolve() == TTS_CACHE_DIR.resolve():
                 await asyncio.to_thread(cleanup_tts_cache_dir, self._cache_dir, self._cache_max_bytes, skip={cache_path})

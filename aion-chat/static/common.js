@@ -1,5 +1,67 @@
 /* ── Aion Common JS — 共享工具函数 ── */
 
+(function () {
+  const KEY = 'aion_chat_theme';
+  const STYLE_ID = 'aion-theme-css';
+  const STYLE_HREF = '/static/theme.css?v=20260606';
+
+  function normalizeTheme(theme) {
+    return theme === 'light' ? 'light' : 'dark';
+  }
+
+  function ensureThemeStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const link = document.createElement('link');
+    link.id = STYLE_ID;
+    link.rel = 'stylesheet';
+    link.href = STYLE_HREF;
+    document.head.appendChild(link);
+  }
+
+  function updateThemeChrome(theme) {
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', theme === 'dark' ? '#050923' : '#eef3ff');
+    if (window.AionStatusBar) window.AionStatusBar.setBarStyle(theme);
+  }
+
+  function applyAionTheme(theme, options) {
+    const next = normalizeTheme(theme);
+    document.documentElement.dataset.theme = next;
+    if (document.body) document.body.dataset.theme = next;
+    if (!options || options.persist !== false) localStorage.setItem(KEY, next);
+    updateThemeChrome(next);
+    window.dispatchEvent(new CustomEvent('aion-theme-applied', { detail: { theme: next } }));
+    return next;
+  }
+
+  function initialTheme() {
+    return localStorage.getItem(KEY)
+      || (document.body && document.body.dataset.theme)
+      || document.documentElement.dataset.theme
+      || 'light';
+  }
+
+  window.AionTheme = Object.assign(window.AionTheme || {}, {
+    key: KEY,
+    apply: applyAionTheme,
+    ensureStyles: ensureThemeStyles,
+    current: () => normalizeTheme((document.body && document.body.dataset.theme) || document.documentElement.dataset.theme || 'light')
+  });
+  window.applyAionTheme = applyAionTheme;
+
+  function initTheme() {
+    ensureThemeStyles();
+    applyAionTheme(initialTheme(), { persist: Boolean(localStorage.getItem(KEY)) });
+  }
+
+  if (document.body) initTheme();
+  else document.addEventListener('DOMContentLoaded', initTheme, { once: true });
+
+  window.addEventListener('storage', event => {
+    if (event.key === KEY) applyAionTheme(event.newValue || initialTheme(), { persist: false });
+  });
+})();
+
 const $ = id => document.getElementById(id);
 
 // Android APK 中 WebView 是 edge-to-edge，普通功能页需要自己避开系统状态栏。
@@ -121,7 +183,10 @@ function connectCommonWS(extraHandler) {
     if (msg.type === "monitor_alert") {
       const audio = new Audio('/public/AionMonitoralart.mp3');
       audio.play().catch(() => {});
-      sendSystemNotification('📷 监控提醒', msg.data?.content || '哨兵监控即将分析');
+      const body = msg.data?.origin_name
+        ? `【${msg.data.origin_name}】设定的监督：${msg.data?.content || '哨兵监控即将分析'}`
+        : (msg.data?.content || '哨兵监控即将分析');
+      sendSystemNotification('📷 监控提醒', body);
       return;
     }
     // 礼物通知 — 全局
@@ -140,14 +205,19 @@ let _alarmQueue = [];
 function showAlarmPopup(data) {
   _alarmQueue.push(data);
   if (_alarmQueue.length === 1) _showNextAlarm();
-  sendSystemNotification('⏰ 闹铃', data.content || '日程提醒');
+  const body = data.origin_name
+    ? `【${data.origin_name}】设定的闹铃：${data.content || '日程提醒'}`
+    : (data.content || '日程提醒');
+  sendSystemNotification('⏰ 闹铃', body);
 }
 function _showNextAlarm() {
   if (!_alarmQueue.length) return;
   // 确保 DOM 中有闹铃弹窗
   _ensureAlarmOverlay();
   const data = _alarmQueue[0];
-  $("alarmContent").textContent = data.content || "日程提醒";
+  $("alarmContent").textContent = data.origin_name
+    ? `【${data.origin_name}】设定的闹铃：${data.content || "日程提醒"}`
+    : (data.content || "日程提醒");
   $("alarmTime").textContent = data.trigger_at || "";
   $("alarmOverlay").classList.add("show");
 }

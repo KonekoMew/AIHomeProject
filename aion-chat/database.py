@@ -36,8 +36,20 @@ async def init_db():
             await db.execute("ALTER TABLE messages ADD COLUMN starred INTEGER DEFAULT 0")
         except:
             pass
+        for col, defn in [
+            ("ai_feedback_rating", "TEXT DEFAULT ''"),
+            ("ai_feedback_reason", "TEXT DEFAULT ''"),
+            ("ai_feedback_created_at", "REAL"),
+            ("ai_feedback_updated_at", "REAL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE messages ADD COLUMN {col} {defn}")
+            except:
+                pass
         # 性能索引
         await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_conv_id ON messages(conv_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_messages_ai_feedback ON messages(ai_feedback_updated_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS memories (
@@ -57,11 +69,49 @@ async def init_db():
             ("source_end_ts", "REAL"),
             ("unresolved", "INTEGER DEFAULT 0"),
             ("source_msg_id", "TEXT"),
+            ("compression_stage", "INTEGER DEFAULT 0"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE memories ADD COLUMN {col} {defn}")
             except:
                 pass
+        await db.execute("UPDATE memories SET compression_stage=1 WHERE type='seeky_compressed' AND COALESCE(compression_stage,0)=0")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS daily_memory_compress_reviews (
+                id TEXT PRIMARY KEY,
+                target TEXT NOT NULL DEFAULT 'both',
+                status TEXT NOT NULL DEFAULT 'draft',
+                days INTEGER NOT NULL DEFAULT 14,
+                cutoff_ts REAL NOT NULL,
+                model_main TEXT DEFAULT '',
+                model_chatroom TEXT DEFAULT '',
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                payload TEXT NOT NULL DEFAULT '{}',
+                raw_response TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                apply_result TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                applied_at REAL,
+                discarded_at REAL
+            )
+        """)
+        try:
+            await db.execute("ALTER TABLE daily_memory_compress_reviews ADD COLUMN target TEXT NOT NULL DEFAULT 'both'")
+        except:
+            pass
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_memory_compress_reviews_created ON daily_memory_compress_reviews(created_at DESC)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS daily_memory_compress_log (
+                id TEXT PRIMARY KEY,
+                actor TEXT NOT NULL,
+                old_ids TEXT DEFAULT '[]',
+                new_ids TEXT DEFAULT '[]',
+                important_ids TEXT DEFAULT '[]',
+                message TEXT DEFAULT '',
+                created_at REAL NOT NULL
+            )
+        """)
         # ── 日程/闹铃表 ──
         await db.execute("""
             CREATE TABLE IF NOT EXISTS schedules (
@@ -377,7 +427,75 @@ async def init_db():
                 FOREIGN KEY (room_id) REFERENCES chatroom_rooms(id) ON DELETE CASCADE
             )
         """)
+        for col, defn in [
+            ("ai_feedback_rating", "TEXT DEFAULT ''"),
+            ("ai_feedback_reason", "TEXT DEFAULT ''"),
+            ("ai_feedback_created_at", "REAL"),
+            ("ai_feedback_updated_at", "REAL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE chatroom_messages ADD COLUMN {col} {defn}")
+            except:
+                pass
         await db.execute("CREATE INDEX IF NOT EXISTS idx_chatroom_msg_room ON chatroom_messages(room_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_chatroom_msg_created ON chatroom_messages(created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_chatroom_ai_feedback ON chatroom_messages(ai_feedback_updated_at)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS persona_evolution_runs (
+                id TEXT PRIMARY KEY,
+                actor TEXT NOT NULL DEFAULT 'main_ai',
+                trigger TEXT NOT NULL DEFAULT 'manual',
+                status TEXT NOT NULL DEFAULT 'draft',
+                model TEXT DEFAULT '',
+                window_start_ts REAL NOT NULL,
+                window_end_ts REAL NOT NULL,
+                window_label TEXT DEFAULT '',
+                feedback_count INTEGER NOT NULL DEFAULT 0,
+                summary TEXT DEFAULT '',
+                patch_json TEXT DEFAULT '{}',
+                user_message TEXT DEFAULT '',
+                raw_response TEXT DEFAULT '',
+                error TEXT DEFAULT '',
+                auto_applied INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                applied_at REAL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_persona_evolution_runs_actor_created ON persona_evolution_runs(actor, created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_persona_evolution_runs_window ON persona_evolution_runs(actor, window_start_ts, window_end_ts)")
+        for col, defn in [
+            ("before_json", "TEXT DEFAULT '{}'"),
+            ("after_json", "TEXT DEFAULT '{}'"),
+            ("diff_json", "TEXT DEFAULT '[]'"),
+            ("feedback_fingerprint", "TEXT DEFAULT ''"),
+            ("daily_memory_json", "TEXT DEFAULT '[]'"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE persona_evolution_runs ADD COLUMN {col} {defn}")
+            except:
+                pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS persona_evolution_items (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                conv_id TEXT DEFAULT '',
+                room_id TEXT DEFAULT '',
+                room_title TEXT DEFAULT '',
+                speaker TEXT DEFAULT '',
+                rating TEXT NOT NULL,
+                reason TEXT DEFAULT '',
+                message_content TEXT DEFAULT '',
+                context_json TEXT DEFAULT '[]',
+                message_created_at REAL,
+                feedback_updated_at REAL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (run_id) REFERENCES persona_evolution_runs(id) ON DELETE CASCADE
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_persona_evolution_items_run ON persona_evolution_items(run_id)")
         # ── 聊天室记忆表 ──
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chatroom_memories (
@@ -400,6 +518,20 @@ async def init_db():
             await db.execute("ALTER TABLE chatroom_memories ADD COLUMN source_msg_id TEXT")
         except:
             pass
+        try:
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN memory_kind TEXT DEFAULT 'long_term'")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE chatroom_memories ADD COLUMN compression_stage INTEGER DEFAULT 0")
+        except:
+            pass
+        await db.execute(
+            "UPDATE chatroom_memories SET memory_kind='daily' "
+            "WHERE (memory_kind IS NULL OR memory_kind='' OR memory_kind='long_term') "
+            "AND source_start_ts IS NOT NULL AND source_end_ts IS NOT NULL "
+            "AND (source_msg_id IS NULL OR TRIM(source_msg_id)='')"
+        )
         # ── 聊天室总结锚点表 ──
         await db.execute("""
             CREATE TABLE IF NOT EXISTS idle_events (
@@ -468,6 +600,66 @@ async def init_db():
                 synced_at REAL NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS health_ring_heart_rates (
+                id TEXT PRIMARY KEY,
+                device_name TEXT DEFAULT '',
+                heart_rate INTEGER NOT NULL,
+                measured_at REAL NOT NULL,
+                source TEXT DEFAULT '',
+                raw_json TEXT DEFAULT '',
+                created_at REAL NOT NULL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_health_ring_heart_rates_measured ON health_ring_heart_rates(measured_at DESC)")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS health_heart_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                sleep_low_max INTEGER NOT NULL DEFAULT 65,
+                normal_min INTEGER NOT NULL DEFAULT 70,
+                normal_max INTEGER NOT NULL DEFAULT 95,
+                elevated_min INTEGER NOT NULL DEFAULT 96,
+                exercise_min INTEGER NOT NULL DEFAULT 100,
+                attention_low INTEGER NOT NULL DEFAULT 45,
+                attention_high INTEGER NOT NULL DEFAULT 135,
+                large_delta INTEGER NOT NULL DEFAULT 25,
+                night_start_hour INTEGER NOT NULL DEFAULT 0,
+                night_end_hour INTEGER NOT NULL DEFAULT 6,
+                stale_minutes INTEGER NOT NULL DEFAULT 30,
+                updated_at REAL NOT NULL DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS health_heart_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                current_category TEXT DEFAULT '',
+                last_heart_rate INTEGER,
+                last_measured_at REAL,
+                sleep_candidate_since REAL,
+                high_candidate_since REAL,
+                last_event_type TEXT DEFAULT '',
+                last_event_at REAL,
+                updated_at REAL NOT NULL DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS health_heart_events (
+                id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'info',
+                heart_rate INTEGER NOT NULL,
+                previous_heart_rate INTEGER,
+                delta INTEGER,
+                category TEXT DEFAULT '',
+                previous_category TEXT DEFAULT '',
+                measured_at REAL NOT NULL,
+                summary TEXT NOT NULL,
+                details_json TEXT DEFAULT '{}',
+                created_at REAL NOT NULL
+            )
+        """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_health_heart_events_created ON health_heart_events(created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_health_heart_events_measured ON health_heart_events(measured_at DESC)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS health_weight_entries (
                 date TEXT PRIMARY KEY,

@@ -22,12 +22,44 @@ from tts import TTSStreamer
 log = logging.getLogger("schedule")
 BACKGROUND_CLI_META = {"antigravity_print_timeout": "90s"}
 
+
+def _tts_voice_for_target(is_chatroom: bool, sender: str) -> str:
+    if is_chatroom:
+        try:
+            from chatroom import load_chatroom_config
+            cfg = load_chatroom_config()
+        except Exception:
+            return ""
+        if not cfg.get("tts_enabled"):
+            return ""
+        key = "tts_aion_voice" if sender == "aion" else "tts_connor_voice"
+        return (cfg.get(key) or "").strip()
+    if not manager.any_tts_enabled():
+        return ""
+    return (manager.get_tts_voice() or "").strip()
+
 # ── 文本指令正则 ──────────────────────────────────
 ALARM_CMD = re.compile(r"\[ALARM:(.+?)\|(.+?)\]")
 REMINDER_CMD = re.compile(r"\[REMINDER:(.+?)\|(.+?)\]")
 MONITOR_CMD = re.compile(r"\[Monitor:(.+?)\|(.+?)\]")
 SCHEDULE_DEL_CMD = re.compile(r"\[SCHEDULE_DEL:(.+?)\]")
 SCHEDULE_LIST_CMD = re.compile(r"\[SCHEDULE_LIST\]")
+
+
+def get_schedule_origin_name(origin: str | None) -> str:
+    """Return the configured display name for the schedule creator."""
+    wb = load_worldbook()
+    origin = (origin or "aion").strip().lower()
+    if origin == "connor":
+        try:
+            from chatroom import load_chatroom_config
+            cfg = load_chatroom_config()
+            return (cfg.get("connor_name") or "AI").strip() or "AI"
+        except Exception:
+            return "AI"
+    if origin == "user":
+        return (wb.get("user_name") or "用户").strip() or "用户"
+    return (wb.get("ai_name") or "AI").strip() or "AI"
 
 
 def _parse_dt(raw: str) -> str | None:
@@ -220,6 +252,7 @@ class ScheduleManager:
         content = item["content"]
         trigger_at = item["trigger_at"]
         origin = item.get("origin", "aion")
+        origin_name = get_schedule_origin_name(origin)
         log.info("firing alarm %s: %s @%s (origin=%s)", sid, content, trigger_at, origin)
 
         # 标记为已触发
@@ -230,7 +263,7 @@ class ScheduleManager:
         # 广播给前端弹窗
         await manager.broadcast({
             "type": "schedule_alarm",
-            "data": {"id": sid, "content": content, "trigger_at": trigger_at},
+            "data": {"id": sid, "content": content, "trigger_at": trigger_at, "origin": origin, "origin_name": origin_name},
         })
         await manager.broadcast({"type": "schedule_changed"})
 
@@ -243,6 +276,12 @@ class ScheduleManager:
         wb = load_worldbook()
         user_name = wb.get("user_name", "你")
         ai_name = wb.get("ai_name", "AI")
+        heart_rate_block = ""
+        try:
+            from health_context import build_heart_rate_prompt_block
+            heart_rate_block = await build_heart_rate_prompt_block(user_name)
+        except Exception:
+            heart_rate_block = ""
 
         # 获取 conv_id（始终需要，用于 Aion 的上下文获取和保存）
         async with get_db() as db:
@@ -285,6 +324,7 @@ class ScheduleManager:
                 f"[日程闹铃触发]\n"
                 f"日程内容：{trigger_at} — {content}\n"
                 f"现在时间已经到了（当前 {now_str}），请提醒【{user_name}】。"
+                f"{heart_rate_block}"
             )
             messages_ctx.append({"role": "user", "content": trigger_prompt})
             messages = messages_ctx
@@ -326,6 +366,7 @@ class ScheduleManager:
                 f"[日程闹铃触发]\n"
                 f"日程内容：{trigger_at} — {content}\n"
                 f"现在时间已经到了（当前 {now_str}），请提醒【{user_name}】。"
+                f"{heart_rate_block}"
             )
 
             recalled, _ = await recall_memories(trigger_prompt[:300])
@@ -350,10 +391,9 @@ class ScheduleManager:
             _connor_model = (_lcc_cr().get("connor_model") or "Codex").strip() or "Codex"
 
             alarm_tts = None
-            if manager.any_tts_enabled():
-                tts_voice = _lcc_cr().get("tts_connor_voice", "") or manager.get_tts_voice()
-                if tts_voice:
-                    alarm_tts = TTSStreamer(ai_msg_id, tts_voice, manager)
+            tts_voice = _tts_voice_for_target(is_chatroom, "connor")
+            if tts_voice:
+                alarm_tts = TTSStreamer(ai_msg_id, tts_voice, manager)
 
             full_text = ""
             try:
@@ -377,10 +417,9 @@ class ScheduleManager:
         else:
             # Aion 来源用常规 stream_ai
             alarm_tts = None
-            if manager.any_tts_enabled():
-                tts_voice = manager.get_tts_voice()
-                if tts_voice:
-                    alarm_tts = TTSStreamer(ai_msg_id, tts_voice, manager)
+            tts_voice = _tts_voice_for_target(is_chatroom, "aion")
+            if tts_voice:
+                alarm_tts = TTSStreamer(ai_msg_id, tts_voice, manager)
 
             full_text = ""
             try:
@@ -416,9 +455,9 @@ class ScheduleManager:
 
         # 处理回复中可能包含的日程指令
         if is_chatroom:
-            full_text = await process_schedule_commands(full_text, None, origin=origin, origin_room_id=target["room_id"])
+            full_text = await process_schedule_commands(full_text, None, origin=origin, origin_room_id=target["room_id"], after_msg_id=ai_msg_id)
         else:
-            full_text = await process_schedule_commands(full_text, conv_id)
+            full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
 
         music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
         att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else "[]"
@@ -448,6 +487,7 @@ class ScheduleManager:
         content = item["content"]
         trigger_at = item["trigger_at"]
         origin = item.get("origin", "aion")
+        origin_name = get_schedule_origin_name(origin)
         log.info("firing monitor %s: %s @%s (origin=%s)", sid, content, trigger_at, origin)
 
         # 标记为已触发
@@ -465,7 +505,7 @@ class ScheduleManager:
         from camera import cam
         fname = None
         # 播放提示音 + 5秒延迟，给用户反应时间
-        await manager.broadcast({"type": "monitor_alert", "data": {"content": content}})
+        await manager.broadcast({"type": "monitor_alert", "data": {"content": content, "origin": origin, "origin_name": origin_name}})
         await asyncio.sleep(5)
 
         jpg_bytes = cam.get_frame_jpeg() or cam.get_screen_only_jpeg()
@@ -516,6 +556,12 @@ class ScheduleManager:
             f"\n以下是{user_name}过去一小时的用户关键动态：\n{user_dynamics_text}\n"
             if user_dynamics_text else ""
         )
+        heart_rate_block = ""
+        try:
+            from health_context import build_heart_rate_prompt_block
+            heart_rate_block = await build_heart_rate_prompt_block(user_name)
+        except Exception:
+            heart_rate_block = ""
 
         # 触发提示词（两种来源共用）
         trigger_prompt = (
@@ -533,10 +579,11 @@ class ScheduleManager:
                 f"{activity_summary_text}\n"
             )
         trigger_prompt += user_dynamics_block
+        trigger_prompt += heart_rate_block
         if fname:
-            trigger_prompt += f"\n请根据画面内容、设备活动动态和之前的对话上下文，自然地回应。"
+            trigger_prompt += f"\n请根据画面内容、设备活动动态、心率摘要和之前的对话上下文，自然地回应。"
         else:
-            trigger_prompt += f"\n请根据设备活动动态和之前的对话上下文，自然地回应。"
+            trigger_prompt += f"\n请根据设备活动动态、心率摘要和之前的对话上下文，自然地回应。"
 
         # 根据来源构建不同的上下文
         if origin == "connor" and is_chatroom:
@@ -610,10 +657,9 @@ class ScheduleManager:
             _connor_model = (_lcc_cr().get("connor_model") or "Codex").strip() or "Codex"
 
             monitor_tts = None
-            if manager.any_tts_enabled():
-                tts_voice = _lcc_cr().get("tts_connor_voice", "") or manager.get_tts_voice()
-                if tts_voice:
-                    monitor_tts = TTSStreamer(ai_msg_id, tts_voice, manager)
+            tts_voice = _tts_voice_for_target(is_chatroom, "connor")
+            if tts_voice:
+                monitor_tts = TTSStreamer(ai_msg_id, tts_voice, manager)
 
             full_text = ""
             try:
@@ -636,10 +682,9 @@ class ScheduleManager:
                 full_text = f"[定时监控回复失败] {e}"
         else:
             monitor_tts = None
-            if manager.any_tts_enabled():
-                tts_voice = manager.get_tts_voice()
-                if tts_voice:
-                    monitor_tts = TTSStreamer(ai_msg_id, tts_voice, manager)
+            tts_voice = _tts_voice_for_target(is_chatroom, "aion")
+            if tts_voice:
+                monitor_tts = TTSStreamer(ai_msg_id, tts_voice, manager)
 
             full_text = ""
             try:
@@ -675,9 +720,9 @@ class ScheduleManager:
 
         # 处理回复中可能包含的日程指令
         if is_chatroom:
-            full_text = await process_schedule_commands(full_text, None, origin=origin, origin_room_id=target["room_id"])
+            full_text = await process_schedule_commands(full_text, None, origin=origin, origin_room_id=target["room_id"], after_msg_id=ai_msg_id)
         else:
-            full_text = await process_schedule_commands(full_text, conv_id)
+            full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
 
         music_atts = [{"type": "music", "name": s["name"], "artist": s["artist"], "id": s["id"]} for s in music_cards] if music_cards else []
         att_json = json.dumps(music_atts, ensure_ascii=False) if music_atts else "[]"
@@ -685,7 +730,7 @@ class ScheduleManager:
         # ── 保存到目标窗口 ──
         if origin == "connor":
             from chatroom import load_chatroom_config
-            _cname = load_chatroom_config().get("connor_name", "Connor")
+            _cname = load_chatroom_config().get("connor_name", "AI")
             sys_content = f"{_cname}查看了监控"
         else:
             sys_content = f"{ai_name}查看了监控"
@@ -708,16 +753,16 @@ class ScheduleManager:
 
 
 # ── 指令解析（在 AI 回复完成后调用） ──────────────
-async def process_schedule_commands(full_text: str, conv_id: str = None, origin: str = "aion", origin_room_id: str = "") -> str:
+async def process_schedule_commands(full_text: str, conv_id: str = None, origin: str = "aion", origin_room_id: str = "", after_msg_id: str = None) -> str:
     """
     检测并处理 AI 回复中的日程指令，返回 strip 后的文本。
     即使 AI 格式有误也不抛异常，静默跳过。
     origin: 'aion' 或 'connor'，标记创建者
     origin_room_id: 群聊/Connor私聊的 room_id（空=Aion私聊创建）
+    after_msg_id: 由某条 AI 回复里的指令产生时，前端应把系统提示显示在该回复下方
     """
     text = full_text
-    wb = load_worldbook()
-    ai_name = wb.get("ai_name", "AI")
+    actor_name = get_schedule_origin_name(origin)
 
     # [ALARM:datetime|content]
     for match in ALARM_CMD.finditer(full_text):
@@ -728,7 +773,7 @@ async def process_schedule_commands(full_text: str, conv_id: str = None, origin:
             if dt and content.strip() and not _is_schedule_time_stale(dt):
                 await _add_schedule("alarm", dt, content.strip(), origin, origin_room_id)
                 if conv_id:
-                    await _sys_msg(conv_id, f"{ai_name} 设置了 {dt.replace('T', ' ')} 的闹铃：{content.strip()}")
+                    await _sys_msg(conv_id, f"【{actor_name}】设定了闹铃：{dt.replace('T', ' ')}，内容：{content.strip()}", after_msg_id=after_msg_id)
             elif dt and content.strip():
                 log.warning("ALARM skipped because trigger time is stale: raw_dt=%s parsed=%s content=%s", raw_dt, dt, content)
             else:
@@ -746,7 +791,7 @@ async def process_schedule_commands(full_text: str, conv_id: str = None, origin:
             if dt and content.strip() and not _is_schedule_time_stale(dt):
                 await _add_schedule("reminder", dt, content.strip(), origin, origin_room_id)
                 if conv_id:
-                    await _sys_msg(conv_id, f"{ai_name} 设置了 {dt.replace('T', ' ')} 的日程：{content.strip()}")
+                    await _sys_msg(conv_id, f"【{actor_name}】设定了日程：{dt.replace('T', ' ')}，内容：{content.strip()}", after_msg_id=after_msg_id)
             elif dt and content.strip():
                 log.warning("REMINDER skipped because trigger time is stale: raw_dt=%s parsed=%s content=%s", raw_dt, dt, content)
             else:
@@ -764,7 +809,7 @@ async def process_schedule_commands(full_text: str, conv_id: str = None, origin:
             if dt and content.strip() and not _is_schedule_time_stale(dt):
                 await _add_schedule("monitor", dt, content.strip(), origin, origin_room_id)
                 if conv_id:
-                    await _sys_msg(conv_id, f"{ai_name} 设置了 {dt.replace('T', ' ')} 的查岗：{content.strip()}")
+                    await _sys_msg(conv_id, f"【{actor_name}】设定了监督：{dt.replace('T', ' ')}，内容：{content.strip()}", after_msg_id=after_msg_id)
             elif dt and content.strip():
                 log.warning("MONITOR skipped because trigger time is stale: raw_dt=%s parsed=%s content=%s", raw_dt, dt, content)
             else:
@@ -783,7 +828,7 @@ async def process_schedule_commands(full_text: str, conv_id: str = None, origin:
                 if conv_id and info:
                     type_labels = {"alarm": "闹铃", "reminder": "日程", "monitor": "定时监控"}
                     label = type_labels.get(info["type"], "日程")
-                    await _sys_msg(conv_id, f"{ai_name} 取消了 {info['trigger_at'].replace('T', ' ')} 的{label}：{info['content']}")
+                    await _sys_msg(conv_id, f"【{actor_name}】取消了 {info['trigger_at'].replace('T', ' ')} 的{label}：{info['content']}", after_msg_id=after_msg_id)
         except Exception as e:
             log.error("SCHEDULE_DEL processing error: %s", e)
     text = SCHEDULE_DEL_CMD.sub("", text)
@@ -794,18 +839,20 @@ async def process_schedule_commands(full_text: str, conv_id: str = None, origin:
     return text.strip()
 
 
-async def _sys_msg(conv_id: str, content: str):
+async def _sys_msg(conv_id: str, content: str, after_msg_id: str = None):
     """插入一条系统消息并广播"""
     now = time.time()
     msg_id = f"msg_{int(now*1000)}_ss"
+    order_atts = [{"type": "system_notice_order", "after_msg_id": after_msg_id}] if after_msg_id else []
+    att_json = json.dumps(order_atts, ensure_ascii=False) if order_atts else "[]"
     async with get_db() as db:
         await db.execute(
             "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
-            (msg_id, conv_id, "system", content, now, "[]"),
+            (msg_id, conv_id, "system", content, now, att_json),
         )
         await db.commit()
     msg = {"id": msg_id, "conv_id": conv_id, "role": "system",
-           "content": content, "created_at": now, "attachments": []}
+           "content": content, "created_at": now, "attachments": order_atts}
     await manager.broadcast({"type": "msg_created", "data": msg})
 
 
@@ -843,7 +890,7 @@ async def get_active_schedules() -> list[dict]:
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            "SELECT id, type, trigger_at, content FROM schedules WHERE status='active' ORDER BY trigger_at",
+            "SELECT id, type, trigger_at, content, origin, origin_room_id FROM schedules WHERE status='active' ORDER BY trigger_at",
         )
         return [dict(r) for r in await cur.fetchall()]
 
@@ -856,7 +903,8 @@ def build_schedule_prompt(schedules: list[dict]) -> str:
     lines = []
     for s in schedules:
         icon, label = type_map.get(s["type"], ("📋", "日程"))
-        lines.append(f"- {icon} {label} #{s['id']}: {s['trigger_at'].replace('T', ' ')} — {s['content']}")
+        origin_name = get_schedule_origin_name(s.get("origin"))
+        lines.append(f"- {icon} 【{origin_name}】设定了{label} #{s['id']}: {s['trigger_at'].replace('T', ' ')} — {s['content']}")
     return "\n".join(lines)
 
 

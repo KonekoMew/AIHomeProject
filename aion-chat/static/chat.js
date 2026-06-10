@@ -55,6 +55,7 @@ function playRecv() { sndRecv.currentTime = 0; sndRecv.play().catch(() => {}); }
 
 function applyAionTheme(theme) {
   const next = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
   document.body.dataset.theme = next;
   localStorage.setItem('aion_chat_theme', next);
   const meta = document.querySelector('meta[name="theme-color"]');
@@ -1050,12 +1051,17 @@ function showAlarmPopup(data) {
   _alarmQueue.push(data);
   if (_alarmQueue.length === 1) _showNextAlarm();
   // 系统通知（即使标签页在后台也能弹出）
-  sendSystemNotification('⏰ 闹铃', data.content || '日程提醒');
+  const body = data.origin_name
+    ? `【${data.origin_name}】设定的闹铃：${data.content || '日程提醒'}`
+    : (data.content || '日程提醒');
+  sendSystemNotification('⏰ 闹铃', body);
 }
 function _showNextAlarm() {
   if (!_alarmQueue.length) return;
   const data = _alarmQueue[0];
-  $("alarmContent").textContent = data.content || "日程提醒";
+  $("alarmContent").textContent = data.origin_name
+    ? `【${data.origin_name}】设定的闹铃：${data.content || "日程提醒"}`
+    : (data.content || "日程提醒");
   $("alarmTime").textContent = data.trigger_at || "";
   $("alarmOverlay").classList.add("show");
 }
@@ -1214,7 +1220,10 @@ function handleSync(msg) {
     // 定时监控即将触发，播放提示音
     const audio = new Audio('/public/AionMonitoralart.mp3');
     audio.play().catch(() => {});
-    sendSystemNotification('📷 监控提醒', data.content || '哨兵监控即将分析');
+    const body = data.origin_name
+      ? `【${data.origin_name}】设定的监督：${data.content || '哨兵监控即将分析'}`
+      : (data.content || '哨兵监控即将分析');
+    sendSystemNotification('📷 监控提醒', body);
   } else if (type === "schedule_changed") {
     // 日程管理已拆分为独立页面
   } else if (type === "moment_new") {
@@ -1254,6 +1263,72 @@ function fmtTime(ts) {
   return time;
 }
 
+const LEGACY_COMMAND_SYSTEM_NOTICE_RE = /^【[^】]+】(?:设定了|取消了)/;
+
+function systemNoticeAfterMsgId(m) {
+  if (!m || m.role !== "system" || !Array.isArray(m.attachments)) return "";
+  const marker = m.attachments.find(a => a && typeof a === "object" && a.type === "system_notice_order" && a.after_msg_id);
+  return marker ? String(marker.after_msg_id) : "";
+}
+
+function isLegacyCommandSystemNotice(m) {
+  if (!m || m.role !== "system" || systemNoticeAfterMsgId(m)) return false;
+  return LEGACY_COMMAND_SYSTEM_NOTICE_RE.test((m.content || "").trim());
+}
+
+function previousDisplayRole(messages, idx) {
+  for (let i = idx - 1; i >= 0; i--) {
+    const role = messages[i]?.role;
+    if (role && !["system", "cam_user", "cam_log", "cam_trigger"].includes(role)) return role;
+  }
+  return "";
+}
+
+function messagesForDisplay(messages) {
+  const out = [];
+  const pendingById = new Map();
+  let pendingLegacyNotices = [];
+  const list = messages || [];
+  const indexById = new Map(list.map((m, idx) => [m?.id, idx]));
+
+  function appendPendingFor(id) {
+    const pending = pendingById.get(id);
+    if (pending?.length) {
+      out.push(...pending);
+      pendingById.delete(id);
+    }
+    if (pendingLegacyNotices.length) {
+      out.push(...pendingLegacyNotices);
+      pendingLegacyNotices = [];
+    }
+  }
+
+  for (let idx = 0; idx < list.length; idx++) {
+    const m = list[idx];
+    const afterMsgId = systemNoticeAfterMsgId(m);
+    if (afterMsgId && indexById.has(afterMsgId) && idx < indexById.get(afterMsgId)) {
+      if (!pendingById.has(afterMsgId)) pendingById.set(afterMsgId, []);
+      pendingById.get(afterMsgId).push(m);
+      continue;
+    }
+
+    if (isLegacyCommandSystemNotice(m) && previousDisplayRole(list, idx) !== "assistant") {
+      pendingLegacyNotices.push(m);
+      continue;
+    }
+
+    if (pendingLegacyNotices.length && m?.role !== "assistant") {
+      out.push(...pendingLegacyNotices);
+      pendingLegacyNotices = [];
+    }
+    out.push(m);
+    if (m?.role === "assistant") appendPendingFor(m.id);
+  }
+  if (pendingLegacyNotices.length) out.push(...pendingLegacyNotices);
+  for (const pending of pendingById.values()) out.push(...pending);
+  return out;
+}
+
 // ── 渲染 ──
 function renderModelSelect() {
   $("modelSelect").innerHTML = models.map(m =>
@@ -1288,7 +1363,7 @@ function renderMessages() {
   }
 
   const loadMoreBtn = hasMoreMessages ? '<div class="load-more-bar" onclick="loadOlderMessages()">⬆ 加载更早的消息</div>' : '';
-  el.innerHTML = loadMoreBtn + currentMessages.map(m => {
+  el.innerHTML = loadMoreBtn + messagesForDisplay(currentMessages).map(m => {
     const isUser = m.role === "user";
 
     // 隐藏监控相关消息（日志已独立存储）
@@ -1298,8 +1373,10 @@ function renderMessages() {
 
     // 系统提示消息（居中显示）
     if (m.role === "system") {
+      const afterMsgId = systemNoticeAfterMsgId(m);
+      const afterAttr = afterMsgId ? ` data-after-msg-id="${escHtml(afterMsgId)}"` : "";
       return `
-      <div class="msg-row system" id="m_${m.id}" data-msg-id="${m.id}">
+      <div class="msg-row system" id="m_${m.id}" data-msg-id="${m.id}"${afterAttr}>
         <div class="system-notice">
           <span class="system-notice-text">${escHtml(m.content)}</span>
           <button class="msg-dots system-dots" onclick="event.stopPropagation();toggleMsgMenu('${m.id}')">&#8943;</button>
@@ -1310,6 +1387,7 @@ function renderMessages() {
       </div>`;
     }
 
+    const isAssistant = m.role === "assistant";
     const roleLabel = isUser ? (worldBook.user_name || '你') : (worldBook.ai_name || 'AI');
     const time = m.created_at ? fmtTime(m.created_at) : "";
     const starLabel = m.starred ? '取消星标' : '⭐ 星标';
@@ -1317,6 +1395,10 @@ function renderMessages() {
     const starBadge = m.starred ? '<span class="msg-star-badge">✨</span>' : '';
     const dotsLeft = isUser ? `<button class="msg-dots" onclick="event.stopPropagation();toggleMsgMenu('${m.id}')">&#8943;</button>` : '';
     const dotsRight = !isUser ? `<button class="msg-dots" onclick="event.stopPropagation();toggleMsgMenu('${m.id}')">&#8943;</button>` : '';
+    const feedbackHtml = isAssistant ? `<span class="msg-feedback-actions">
+      <button class="msg-feedback-btn ${m.ai_feedback_rating === 'like' ? 'active' : ''}" onclick="openMsgFeedback(event,'${m.id}','like')" title="喜欢这条回复">👍</button>
+      <button class="msg-feedback-btn ${m.ai_feedback_rating === 'dislike' ? 'active' : ''}" onclick="openMsgFeedback(event,'${m.id}','dislike')" title="不喜欢这条回复">👎</button>
+    </span>` : '';
     const displayContent = isUser ? m.content : m.content.replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
     const hasVoiceAtt = m.attachments && m.attachments.some(a => typeof a === 'object' && (a.type === 'voice' || a.type === 'video_clip'));
     // 转账标签前后强制换行，确保卡片独占一个气泡
@@ -1341,7 +1423,7 @@ function renderMessages() {
       </div>
       <div class="msg-body">
         <div class="msg-role-row">
-          ${dotsLeft}<span class="msg-role-name">${roleLabel}</span><span class="msg-time">${time}</span>${dotsRight}${starBadge}
+          ${dotsLeft}<span class="msg-role-name">${roleLabel}</span><span class="msg-time">${time}</span>${dotsRight}${feedbackHtml}${starBadge}
           <div class="msg-menu" id="menu_${m.id}">${actionsHtml}</div>
         </div>
         ${bubblesHtml}
@@ -1652,6 +1734,68 @@ async function toggleStar(msgId) {
     if (res.error) return;
     // WebSocket broadcast 会自动更新 currentMessages 并 renderMessages
   } catch(e) { console.error('星标切换失败:', e); }
+}
+
+let msgFeedbackPopover = null;
+
+function closeMsgFeedbackPopover() {
+  if (msgFeedbackPopover) {
+    msgFeedbackPopover.remove();
+    msgFeedbackPopover = null;
+  }
+}
+
+function openMsgFeedback(ev, msgId, rating) {
+  ev?.stopPropagation?.();
+  closeMsgMenus();
+  closeMsgFeedbackPopover();
+  const msg = currentMessages.find(m => m.id === msgId);
+  const label = rating === 'like' ? '喜欢的原因' : '不喜欢的原因';
+  const existing = msg?.ai_feedback_rating === rating ? (msg.ai_feedback_reason || '') : '';
+  const pop = document.createElement('div');
+  pop.className = 'msg-feedback-popover';
+  pop.innerHTML = `
+    <div class="msg-feedback-title">${label}</div>
+    <textarea id="msgFeedbackReason" rows="3" maxlength="600" placeholder="写一点具体原因，之后复盘会用到">${escHtml(existing)}</textarea>
+    <div class="msg-feedback-footer">
+      <button type="button" class="msg-feedback-cancel" onclick="closeMsgFeedbackPopover()">取消</button>
+      <button type="button" class="msg-feedback-submit" onclick="submitMsgFeedback('${msgId}','${rating}')">确认</button>
+    </div>`;
+  document.body.appendChild(pop);
+  msgFeedbackPopover = pop;
+
+  const rect = ev?.currentTarget?.getBoundingClientRect?.();
+  const pad = 8;
+  if (rect) {
+    const width = pop.offsetWidth || 260;
+    const height = pop.offsetHeight || 160;
+    let left = Math.min(Math.max(pad, rect.left), window.innerWidth - width - pad);
+    let top = rect.bottom + 6;
+    if (top + height > window.innerHeight - pad) top = Math.max(pad, rect.top - height - 6);
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  }
+  setTimeout(() => pop.querySelector('textarea')?.focus(), 0);
+}
+
+async function submitMsgFeedback(msgId, rating) {
+  const reason = document.getElementById('msgFeedbackReason')?.value.trim() || '';
+  if (!reason) {
+    showToast('先写一点原因');
+    return;
+  }
+  try {
+    const res = await api("PATCH", `/api/messages/${encodeURIComponent(msgId)}/feedback`, { rating, reason });
+    if (res.detail || res.error) {
+      showToast(res.detail || res.error || '反馈保存失败');
+      return;
+    }
+    closeMsgFeedbackPopover();
+    showToast('反馈已记录');
+  } catch (e) {
+    console.error('反馈保存失败:', e);
+    showToast('反馈保存失败');
+  }
 }
 
 async function openStarredPanel() {
@@ -2742,6 +2886,68 @@ function handlePoiSearch(categories, msgId) {
 // ── UI ──
 function handleKey(e) { if (e.key === "Enter" && e.ctrlKey) { e.preventDefault(); send(); } }
 
+function luckinOrderStatusHtml(data) {
+  const code = data && data.take_meal_code ? String(data.take_meal_code) : "";
+  const takeOrderId = data && data.take_order_id ? String(data.take_order_id) : "";
+  const status = data && data.order_status_name
+    ? String(data.order_status_name)
+    : (data && data.order_status !== undefined && data.order_status !== null ? `状态 ${data.order_status}` : "");
+  const time = data && (data.take_meal_time || data.about_time) ? String(data.take_meal_time || data.about_time) : "";
+  if (code) {
+    const orderLine = takeOrderId ? `<div style="font-size:11px;color:rgba(255,255,255,.58);margin-top:3px">取餐序号：${escHtml(takeOrderId)}</div>` : "";
+    const statusLine = status ? `<div style="font-size:11px;color:rgba(255,255,255,.58);margin-top:3px">${escHtml(status)}</div>` : "";
+    return `<div style="font-size:13px;color:#fff;margin-top:8px">取餐码：<b style="font-size:18px;letter-spacing:.5px">${escHtml(code)}</b></div>${orderLine}${statusLine}`;
+  }
+  const main = status ? `当前状态：${status}` : "暂时还没有取餐码";
+  const hint = time ? `预计：${time}` : "支付后稍等再查一次";
+  return `<div style="font-size:12px;color:rgba(255,255,255,.72);margin-top:8px;line-height:1.35">${escHtml(main)}</div><div style="font-size:11px;color:rgba(255,255,255,.52);margin-top:3px">${escHtml(hint)}</div>`;
+}
+
+async function queryLuckinOrderStatus(btn) {
+  const orderId = btn?.dataset?.orderId || "";
+  const card = btn?.closest('.luckin-pay-card');
+  const statusEl = card?.querySelector('.luckin-order-status');
+  if (!orderId || !statusEl) return;
+  const oldText = btn.textContent || "查询取餐码";
+  btn.disabled = true;
+  btn.textContent = "查询中...";
+  statusEl.innerHTML = '<div style="font-size:12px;color:rgba(255,255,255,.72);margin-top:8px">正在查询订单状态...</div>';
+  try {
+    const res = await fetch(`/api/luckin/order/${encodeURIComponent(orderId)}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.detail || data.error || "查询失败");
+    statusEl.innerHTML = luckinOrderStatusHtml(data);
+  } catch (err) {
+    statusEl.innerHTML = `<div style="font-size:12px;color:#ffd1d1;margin-top:8px;line-height:1.35">${escHtml(err.message || "查询失败")}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+
+function buildLuckinPaymentCard(item) {
+  const title = escHtml(item.title || "瑞幸咖啡订单");
+  const shop = item.shop ? `<div style="font-size:12px;color:rgba(255,255,255,.72);margin-top:2px">${escHtml(item.shop)}</div>` : "";
+  const address = item.address ? `<div style="font-size:12px;color:rgba(255,255,255,.6);margin-top:2px;line-height:1.35">${escHtml(item.address)}</div>` : "";
+  const amount = item.amount ? `<div style="font-size:13px;color:#fff;margin-top:6px">待支付：${escHtml(item.amount)}</div>` : "";
+  const orderId = item.order_id ? `<div style="font-size:11px;color:rgba(255,255,255,.55);margin-top:2px">订单号：${escHtml(item.order_id)}</div>` : "";
+  const hasSpecWarning = /未匹配|切换失败/.test(item.note || "");
+  const noteLabel = hasSpecWarning ? "规格提醒" : "备注";
+  const noteColor = hasSpecWarning ? "#ffe1a8" : "rgba(255,255,255,.66)";
+  const note = item.note ? `<div style="font-size:11px;color:${noteColor};margin-top:6px;line-height:1.35">${noteLabel}：${escHtml(item.note)}</div>` : "";
+  const qrUrl = item.qr_url || item.url || "";
+  const qr = qrUrl ? `<img src="${escHtml(qrUrl)}" onclick="openImageViewer(this.src)" style="width:168px;max-width:100%;border-radius:8px;background:#fff;padding:8px;display:block;margin:10px auto 6px;cursor:pointer">` : "";
+  const payUrl = item.pay_url || "";
+  const payButton = payUrl ? `<a href="${escHtml(payUrl)}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;justify-content:center;padding:7px 12px;border-radius:999px;background:rgba(255,255,255,.16);color:#fff;text-decoration:none;font-size:13px">打开支付页</a>` : "";
+  const queryButton = item.order_id ? `<button type="button" data-order-id="${escHtml(item.order_id)}" onclick="queryLuckinOrderStatus(this)" style="border:none;display:inline-flex;align-items:center;justify-content:center;padding:7px 12px;border-radius:999px;background:rgba(75,210,176,.24);color:#fff;font-size:13px;cursor:pointer">查询取餐码</button>` : "";
+  const buttons = payButton || queryButton ? `<div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:8px">${payButton}${queryButton}</div>` : "";
+  return `<div class="luckin-pay-card" style="margin-top:8px;padding:12px;border:1px solid rgba(75,210,176,.45);background:rgba(16,86,76,.42);border-radius:10px;max-width:260px">
+    <div style="font-weight:700;color:#fff">瑞幸订单 · 扫码确认支付</div>
+    <div style="font-size:13px;color:#fff;margin-top:4px">${title}</div>
+    ${shop}${address}${amount}${orderId}${note}${qr}<div class="luckin-order-status"></div>${buttons}
+  </div>`;
+}
+
 function renderAttachments(atts) {
   if (!atts || !atts.length) return '';
   let mediaHtml = '';
@@ -2749,7 +2955,9 @@ function renderAttachments(atts) {
   let voiceHtml = '';
   const aiName = worldBook.ai_name || 'AI';
   atts.forEach(item => {
-    if (typeof item === 'object' && item.type === 'music') {
+    if (typeof item === 'object' && item.type === 'luckin_payment') {
+      mediaHtml += buildLuckinPaymentCard(item);
+    } else if (typeof item === 'object' && item.type === 'music') {
       capsuleHtml += `<div class="music-capsule" onclick="openInNetease(${item.id})">🎵 ${escHtml(aiName)}给你点播歌曲《${escHtml(item.name)}》</div>`;
     } else if (typeof item === 'object' && item.type === 'voice') {
       const dur = item.duration || 0;
@@ -2781,7 +2989,7 @@ function renderAttachments(atts) {
       }
       voiceHtml += `</div>`;
     } else {
-      const url = typeof item === 'string' ? item : '';
+      const url = typeof item === 'string' ? item : (item && item.url ? item.url : '');
       if (/\.(mp4|webm|mov)$/i.test(url)) mediaHtml += `<video src="${escHtml(url)}" controls preload="metadata"></video>`;
       else if (url) mediaHtml += `<img src="${escHtml(url)}" onclick="openImageViewer(this.src)">`;
     }
@@ -3370,8 +3578,13 @@ function showMsgMenuForRow(row) {
 function closeMsgMenus() {
   document.querySelectorAll('.msg-menu.show').forEach(m => m.classList.remove('show'));
 }
+document.addEventListener('click', e => {
+  if (!msgFeedbackPopover) return;
+  if (e.target.closest?.('.msg-feedback-popover, .msg-feedback-btn')) return;
+  closeMsgFeedbackPopover();
+});
 function msgMenuRowFromTarget(target) {
-  if (!target || target.closest?.('.msg-menu, button, input, textarea, a')) return null;
+  if (!target || target.closest?.('.msg-menu, .msg-feedback-popover, button, input, textarea, a')) return null;
   return target.closest?.('.msg-row[data-msg-id]');
 }
 $("messages").addEventListener('contextmenu', e => {
@@ -3902,7 +4115,7 @@ function _presentNextGift() {
           <img class="gift-image" src="/uploads/${gift.image_path}" alt="礼物" />
         </div>
         <div class="gift-message-wrap" id="giftMessageWrap" style="display:none">
-          <p class="gift-message-from" style="text-align:center;opacity:0.7;font-size:0.85em;margin-bottom:4px">—— from ${gift.sender === 'connor' ? (chatroomConfig.connor_name || 'Connor') : ((worldBook && worldBook.ai_name) || 'AI')} ——</p>
+          <p class="gift-message-from" style="text-align:center;opacity:0.7;font-size:0.85em;margin-bottom:4px">—— from ${gift.sender === 'connor' ? (chatroomConfig.connor_name || '第二AI') : ((worldBook && worldBook.ai_name) || 'AI')} ——</p>
           <p class="gift-message-text">${escHtml(gift.message)}</p>
         </div>
         <button class="gift-receive-btn" id="giftReceiveBtn" style="display:none" onclick="_receiveGift('${gift.id}')">💝 收下礼物</button>
@@ -4019,10 +4232,21 @@ function getSolidSubPageColor(foregroundValue, backgroundValue) {
     blue: foreground.blue * alpha + background.blue * (1 - alpha)
   });
 }
-function resetSubPageChrome() {
+function getSubPageThemeChromeColors() {
+  const theme = localStorage.getItem('aion_chat_theme') || document.body.dataset.theme || 'dark';
+  return theme === 'light'
+    ? { safe: '#eef3ff', frame: '#eef3ff', style: 'light' }
+    : { safe: '#050923', frame: '#03061c', style: 'dark' };
+}
+function applySubPageThemeChrome() {
   const ov = $('subPageOverlay');
-  ov.style.setProperty('--subpage-safe-bg', '#fff9f5');
-  ov.style.setProperty('--subpage-frame-bg', '#fff9f5');
+  const colors = getSubPageThemeChromeColors();
+  ov.style.setProperty('--subpage-safe-bg', colors.safe);
+  ov.style.setProperty('--subpage-frame-bg', colors.frame);
+  if (window.AionStatusBar) window.AionStatusBar.setBarStyle(colors.style);
+}
+function resetSubPageChrome() {
+  applySubPageThemeChrome();
 }
 function syncSubPageChromeFromFrame() {
   const frame = $('subPageFrame');
@@ -4035,7 +4259,7 @@ function syncSubPageChromeFromFrame() {
   const bodyStyle = frameWindow.getComputedStyle(doc.body);
   const topBar = doc.querySelector('.top-bar, .chat-header');
   const topBarColor = topBar ? frameWindow.getComputedStyle(topBar).backgroundColor : '';
-  const rootBg = rootStyle.getPropertyValue('--bg').trim();
+  const rootBg = bodyStyle.getPropertyValue('--bg').trim() || rootStyle.getPropertyValue('--bg').trim();
   const bodyBg = bodyStyle.backgroundColor;
   const pageBg = rootBg || bodyBg || '#fff9f5';
   const safeColor = getSolidSubPageColor(topBarColor, pageBg);
@@ -4048,13 +4272,16 @@ function syncSubPageMode(url) {
     try { return new URL(url, location.origin).pathname; } catch(e) { return url || ''; }
   })();
   const isHome = path === '/';
+  const isImmersive = path === '/chatroom';
   const ov = $('subPageOverlay');
   ov.classList.toggle('home-subpage', isHome);
+  ov.classList.toggle('immersive-subpage', isImmersive);
   if (isHome) resetSubPageChrome();
+  else applySubPageThemeChrome();
   $('subPageTitle').textContent = _subPageNames[path] || '';
   if (window.AionStatusBar) {
     if (isHome) applyAionTheme(localStorage.getItem('aion_chat_theme') || document.body.dataset.theme || 'dark');
-    else window.AionStatusBar.setBarStyle('light');
+    else window.AionStatusBar.setBarStyle(getSubPageThemeChromeColors().style);
   }
 }
 function openSubPage(url) {
@@ -4079,6 +4306,7 @@ function closeSubPage(skipReload = false) {
   if (!ov.classList.contains('show')) return;
   ov.classList.remove('show');
   ov.classList.remove('home-subpage');
+  ov.classList.remove('immersive-subpage');
   $('subPageFrame').src = 'about:blank';
   currentSubPage = null;
   applyAionTheme(localStorage.getItem('aion_chat_theme') || document.body.dataset.theme || 'dark');

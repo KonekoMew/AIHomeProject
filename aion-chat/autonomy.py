@@ -12,12 +12,13 @@ from ai_providers import CLI_STATUS_PREFIX, stream_ai
 from config import DEFAULT_MODEL, SETTINGS, load_worldbook, save_settings
 from context_builder import fetch_merged_timeline, render_merged_timeline
 from database import get_db
+from tts import synthesize_message_tts_later
 from ws import manager
 
 
 ACTION_DEFS = {
-    "seeky_interaction": "和 Seeky 互动",
-    "role_chat": "和另一个角色聊一句",
+    "seeky_interaction": "和宠物鲸鱼 Seeky 互动",
+    "role_chat": "和另一个家庭成员聊一句",
     "memory_browse": "随机翻看记忆库",
     "home_dynamics": "查看近期家庭动态",
     "cam_check": "调取监控查看用户当前状态",
@@ -370,7 +371,7 @@ async def _select_action(actor: str) -> dict:
     data = await _ask_actor_json(actor, (
         "[空闲自主行动]\n"
         "现在用户暂时没有和你聊天。请根据你的人设、最近30条聊天记录和当前心情，"
-        "从下面动作里选择一项。只返回 JSON，不要解释。\n\n"
+        "从下面动作里选择一项。只返回 JSON，不要解释。选择尽量多变，不要每次都查看用户当前状态。\n\n"
         f"{options}\n\n"
         '格式：{"action":"上面的key之一","reason":"一句话理由"}'
     ))
@@ -402,6 +403,10 @@ async def _save_aion_private_message(content: str) -> dict | None:
         await db.commit()
     msg = {"id": msg_id, "conv_id": conv_id, "role": "assistant", "content": content, "created_at": now, "attachments": []}
     await manager.broadcast({"type": "msg_created", "data": msg})
+    if manager.any_tts_enabled():
+        voice = manager.get_tts_voice()
+        if voice:
+            synthesize_message_tts_later(msg_id, content, voice, manager)
     try:
         from routes.files import export_conversation
         await export_conversation(conv_id)
@@ -431,8 +436,8 @@ async def _run_seeky_interaction(actor: str) -> dict:
     action_options = "\n".join(f"- {key}: {label}" for key, label in SEEKY_ACTIONS.items())
     data = await _ask_actor_json(actor, (
         "[和 Seeky 互动]\n"
-        "你要和虚拟宠物 Seeky 互动一次。请从动作中选择一项，并留下一句话。"
-        "这是一只虚拟宠物，动作只作为角色互动记录。只返回 JSON。\n\n"
+        "你要和家庭宠物 Seeky 互动一次。请从动作中选择一项，并留下一句话。"
+        "这是你们共同饲养的宠物，动作只作为角色互动记录。只返回 JSON。\n\n"
         f"可选动作：\n{action_options}\n\n"
         f"Seeky 最近20条记录：\n{recent_text}\n\n"
         '格式：{"seeky_action":"feed/clean/play/tease/scare/tap_glass/threaten之一","line":"你留下的一句话"}'
@@ -474,8 +479,8 @@ async def _run_role_chat(actor: str) -> dict:
     data = await _ask_actor_json(actor, (
         "[发起一轮群聊]\n"
         f"你要在最近的群聊里主动对 {target_name} 说一句话，然后对方会回复一句。"
-        "请自然发起一个轻量话题，只说一句。只返回 JSON。\n"
-        '格式：{"message":"要发到群聊的一句话"}'
+        "请自然发起一个话题，讨论一件事或单纯想起什么，随意聊天。只返回 JSON。\n"
+        '格式：{"message":"要发到群聊的一个话题"}'
     ))
     message = _clip(str(data.get("message") or ""), 500)
     if not message:
@@ -600,13 +605,13 @@ async def _run_memory_browse(actor: str) -> dict:
     result = await _ask_actor_json(actor, (
         "[随机翻看记忆库 - 读完某一天]\n"
         "你刚才翻看了下面这一天的所有摘要记忆。这里只包含摘要记忆，不包含挂载的聊天原文。"
-        "读完后请选择一件事：发一条朋友圈、写一篇日记随笔、"
-        "私聊给用户发一条消息，或者什么都不发。只返回 JSON。\n\n"
+        "读完后请选择一件事：发一条朋友圈、写一篇日记随笔、或私聊给用户发一条消息，表达你的感想。"
+        "只返回 JSON。\n\n"
         f"记忆日期：{selected_day}\n"
         f"时间范围：{day_label}\n"
         f"摘要记忆：\n{day_summary}\n\n"
         "格式：\n"
-        '{"after_read_action":"post_moment/write_diary/private_message/none",'
+        '{"after_read_action":"post_moment/write_diary/private_message",'
         '"moment_content":"","diary_title":"","diary_content":"","diary_mood":"","private_message":""}'
     ))
     action = str(result.get("after_read_action") or "none").strip()

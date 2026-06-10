@@ -22,7 +22,7 @@
   background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600;
 }
 .activity-tabs {
-  display:flex; gap:6px; padding:8px 12px 0; background:var(--surface);
+  display:flex; gap:6px; padding:8px 12px 0; background:var(--surface); flex-shrink:0;
 }
 .activity-tab {
   flex:1; border:1px solid var(--border); background:var(--surface2); color:var(--text2);
@@ -31,8 +31,13 @@
 .activity-tab.active {
   background:var(--accent); border-color:var(--accent); color:#fff;
 }
+.page-content {
+  display:flex; flex-direction:column; overflow:hidden; min-height:0;
+}
 .activity-pane { display:none; }
-.activity-pane.active { display:block; }
+.activity-pane.active {
+  display:flex; flex-direction:column; flex:1; min-height:0;
+}
 
 /* ── 统计信息 ── */
 .stats-bar {
@@ -50,7 +55,7 @@
 
 /* ── 日志列表 ── */
 .log-list {
-  flex:1; overflow-y:auto; max-height:calc(100dvh - 200px);
+  flex:1; min-height:0; overflow-y:auto;
   border:1px solid var(--border); border-radius:8px; background:var(--bg); padding:4px;
 }
 .log-entry {
@@ -121,7 +126,7 @@
   text-align:center; flex-shrink:0;
 }
 .timeline-toolbar {
-  display:flex; gap:8px; align-items:center; margin-bottom:10px;
+  display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-shrink:0;
 }
 .timeline-toolbar select, .timeline-toolbar button, .timeline-toolbar input {
   border:1px solid var(--border); background:var(--surface2); color:var(--text);
@@ -136,7 +141,7 @@
   opacity:.7; pointer-events:none;
 }
 .timeline-list {
-  flex:1; overflow-y:auto; max-height:calc(100dvh - 190px);
+  flex:1; min-height:0; overflow-y:auto;
   background:transparent; padding:4px 0 8px;
 }
 .timeline-empty {
@@ -212,11 +217,11 @@
     </div>
   </div>
   <div class="activity-tabs">
-    <button class="activity-tab active" id="tabLogs" onclick="switchActivityTab('logs')">日志</button>
-    <button class="activity-tab" id="tabTimeline" onclick="switchActivityTab('timeline')">家庭动态</button>
+    <button class="activity-tab" id="tabLogs" onclick="switchActivityTab('logs')">日志</button>
+    <button class="activity-tab active" id="tabTimeline" onclick="switchActivityTab('timeline')">家庭动态</button>
   </div>
   <div class="page-content">
-    <div class="activity-pane active" id="logsPane">
+    <div class="activity-pane" id="logsPane">
     <!-- 筛选 -->
     <div class="filter-row">
       <select id="viewMode" onchange="onViewModeChange()">
@@ -236,7 +241,7 @@
     <!-- 日志 -->
     <div class="log-list" id="logList"><div class="log-empty">暂无活动记录</div></div>
     </div>
-    <div class="activity-pane" id="timelinePane">
+    <div class="activity-pane active" id="timelinePane">
       <div class="timeline-toolbar">
         <select id="timelineHours" onchange="loadTimeline()">
           <option value="6">最近 6 小时</option>
@@ -280,11 +285,12 @@
   </div>
 </div>
 
+<script src="/static/theme.js?v=theme-20260606"></script>
 <script src="/static/common.js"></script>
 <script>
 let allEntries = [];
 let deviceFilter = 'all';
-let currentActivityTab = 'logs';
+let currentActivityTab = 'timeline';
 let timelineLoaded = false;
 let timelineItems = [];
 let timelinePressTimer = null;
@@ -678,6 +684,7 @@ async function toggleActivityTracking(enabled) {
 }
 
 /* ── 初始化 ── */
+loadTimeline();
 loadRecent();
 loadActivityConfig();
 loadIdleConfig();

@@ -443,6 +443,7 @@ const APPS = [
 
 function applyAionTheme(theme) {
   const next = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
   document.body.dataset.theme = next;
   localStorage.setItem('aion_chat_theme', next);
   const meta = document.querySelector('meta[name="theme-color"]');
@@ -459,6 +460,9 @@ function toggleAionTheme() {
 }
 
 applyAionTheme(localStorage.getItem('aion_chat_theme') || 'light');
+window.addEventListener('storage', e => {
+  if (e.key === 'aion_chat_theme') applyAionTheme(e.newValue || 'light');
+});
 
 /* ── 渲染 ─────────────────────────────────────── */
 function renderApps() {

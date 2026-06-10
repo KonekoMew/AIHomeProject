@@ -27,6 +27,8 @@ TTS_CACHE_MAX_BYTES = 500 * 1024 * 1024
 THEATER_TTS_CACHE_DIR = DATA_DIR / "theater_tts_cache"
 THEATER_TTS_CACHE_DIR.mkdir(exist_ok=True)
 THEATER_TTS_SEGMENT_DELETE_DELAY_SECONDS = 2 * 60 * 60
+DIARY_TTS_CACHE_DIR = DATA_DIR / "diary_tts_cache"
+DIARY_TTS_CACHE_DIR.mkdir(exist_ok=True)
 
 SETTINGS_PATH = DATA_DIR / "settings.json"
 WORLDBOOK_PATH = DATA_DIR / "worldbook.json"
@@ -117,13 +119,33 @@ def get_embedding_config() -> dict:
     }
 
 # ── Worldbook ────────────────────────────────────
+def _default_worldbook() -> dict:
+    return {
+        "ai_persona": "",
+        "user_persona": "",
+        "system_prompt": "",
+        "system_prompt_enabled": True,
+        "ai_name": "AI",
+        "user_name": "你",
+        "persona_schema_version": 1,
+        "ai_persona_sections": {},
+        "user_persona_sections": {},
+        "creative_rules": "",
+        "persona_section_locks": {},
+        "persona_evolution_enabled": False,
+    }
+
 def load_worldbook():
+    defaults = _default_worldbook()
     if WORLDBOOK_PATH.exists():
         try:
-            return json.loads(WORLDBOOK_PATH.read_text(encoding='utf-8'))
+            data = json.loads(WORLDBOOK_PATH.read_text(encoding='utf-8'))
+            if isinstance(data, dict):
+                defaults.update(data)
+                return defaults
         except:
             pass
-    return {"ai_persona": "", "user_persona": "", "system_prompt": "", "ai_name": "AI", "user_name": "你"}
+    return defaults
 
 def save_worldbook(data: dict):
     WORLDBOOK_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -179,11 +201,15 @@ MODELS = {
     "Gemini-3.5-flash":  {"provider": "gemini", "model": "gemini-3.5-flash", "vision": True},
     "Gemini-3.1-pro":  {"provider": "gemini", "model": "gemini-3.1-pro-preview", "vision": True},
     "DS-v4-pro":     {"provider": "aipro", "model": "deepseek-v4-pro", "vision": False},
+    "DS-V4-Flash":     {"provider": "aipro", "model": "deepseek-v4-flash", "vision": False},
     "CLI-3.1pro":       {"provider": "gemini_cli", "model": "gemini-3.1-pro-preview", "vision": True},
-    # Keep Codex model empty so Codex CLI inherits ~/.codex/config.toml,
-    # including model_reasoning_effort.
-    "Codex":            {"provider": "codex_cli",  "model": "", "vision": True},
+    # ChatGPT-auth Codex does not support some Codex-only defaults, so pin a
+    # model that works after account switches.
+    "Codex":            {"provider": "codex_cli",  "model": "gpt-5.5", "vision": True},
     "Antigravity":        {"provider": "antigravity_cli", "model": "", "vision": True},
+    "AGY-3.5flash":        {"provider": "antigravity_cli", "model": "Gemini 3.5 Flash (Medium)", "vision": True},
+    "AGY-3.1pro":          {"provider": "antigravity_cli", "model": "Gemini 3.1 Pro (High)", "vision": True},
+    "AGY-Claude-Opus-4.6": {"provider": "antigravity_cli", "model": "Claude Opus 4.6 (Thinking)", "vision": True},
 }
 
 DEFAULT_MODEL = "Gemini-3.5-flash"

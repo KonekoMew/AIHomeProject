@@ -6,8 +6,8 @@ import json
 
 from fastapi import APIRouter
 from fastapi.responses import Response, FileResponse
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import Any, Dict, Optional
 
 import httpx
 
@@ -34,6 +34,11 @@ class SettingsUpdate(BaseModel):
     embedding_base_url: Optional[str] = None
     embedding_api_key: Optional[str] = None
     embedding_model: Optional[str] = None
+    luckin_mcp_enabled: Optional[bool] = None
+    luckin_mcp_token: Optional[str] = None
+    luckin_default_longitude: Optional[str] = None
+    luckin_default_latitude: Optional[str] = None
+    luckin_default_shop_keyword: Optional[str] = None
 
 @router.get("/api/settings")
 async def get_settings():
@@ -53,6 +58,11 @@ async def get_settings():
         "embedding_base_url": SETTINGS.get("embedding_base_url", ""),
         "embedding_api_key": SETTINGS.get("embedding_api_key", ""),
         "embedding_model": SETTINGS.get("embedding_model", ""),
+        "luckin_mcp_enabled": SETTINGS.get("luckin_mcp_enabled", False),
+        "luckin_mcp_token": SETTINGS.get("luckin_mcp_token", ""),
+        "luckin_default_longitude": SETTINGS.get("luckin_default_longitude", ""),
+        "luckin_default_latitude": SETTINGS.get("luckin_default_latitude", ""),
+        "luckin_default_shop_keyword": SETTINGS.get("luckin_default_shop_keyword", ""),
         "gemini_key_masked": mask(SETTINGS.get("gemini_key", "")),
         "siliconflow_key_masked": mask(SETTINGS.get("siliconflow_key", "")),
         "gemini_free_key_masked": mask(SETTINGS.get("gemini_free_key", "")),
@@ -64,6 +74,7 @@ async def get_settings():
 
 @router.put("/api/settings")
 async def update_settings(body: SettingsUpdate):
+    luckin_changed = False
     if body.gemini_key is not None:
         SETTINGS["gemini_key"] = body.gemini_key
     if body.siliconflow_key is not None:
@@ -84,6 +95,18 @@ async def update_settings(body: SettingsUpdate):
         SETTINGS["embedding_api_key"] = body.embedding_api_key
     if body.embedding_model is not None:
         SETTINGS["embedding_model"] = body.embedding_model
+    if body.luckin_mcp_enabled is not None:
+        luckin_changed = luckin_changed or SETTINGS.get("luckin_mcp_enabled") != body.luckin_mcp_enabled
+        SETTINGS["luckin_mcp_enabled"] = body.luckin_mcp_enabled
+    if body.luckin_mcp_token is not None:
+        luckin_changed = luckin_changed or SETTINGS.get("luckin_mcp_token", "") != body.luckin_mcp_token
+        SETTINGS["luckin_mcp_token"] = body.luckin_mcp_token
+    if body.luckin_default_longitude is not None:
+        SETTINGS["luckin_default_longitude"] = body.luckin_default_longitude
+    if body.luckin_default_latitude is not None:
+        SETTINGS["luckin_default_latitude"] = body.luckin_default_latitude
+    if body.luckin_default_shop_keyword is not None:
+        SETTINGS["luckin_default_shop_keyword"] = body.luckin_default_shop_keyword
     if body.netease_music_u is not None:
         old_mu = SETTINGS.get("netease_music_u", "")
         SETTINGS["netease_music_u"] = body.netease_music_u
@@ -95,6 +118,13 @@ async def update_settings(body: SettingsUpdate):
             except Exception:
                 pass
     save_settings(SETTINGS)
+    if luckin_changed:
+        try:
+            from luckin import LUCKIN_SERVER_NAME
+            from mcp_client import mcp_manager
+            await mcp_manager.disconnect(LUCKIN_SERVER_NAME)
+        except Exception:
+            pass
     return {"ok": True}
 
 # ── 温度设置 ──────────────────────────────────────
@@ -185,6 +215,12 @@ class WorldBookUpdate(BaseModel):
     system_prompt_enabled: bool = True
     ai_name: str = "AI"
     user_name: str = "你"
+    persona_schema_version: int = 1
+    ai_persona_sections: Dict[str, str] = Field(default_factory=dict)
+    user_persona_sections: Dict[str, str] = Field(default_factory=dict)
+    creative_rules: str = ""
+    persona_section_locks: Dict[str, Any] = Field(default_factory=dict)
+    persona_evolution_enabled: bool = False
 
 @router.get("/api/worldbook")
 async def get_worldbook():
@@ -192,9 +228,10 @@ async def get_worldbook():
 
 @router.put("/api/worldbook")
 async def update_worldbook(body: WorldBookUpdate):
-    save_worldbook({"ai_persona": body.ai_persona, "user_persona": body.user_persona,
-                    "system_prompt": body.system_prompt, "system_prompt_enabled": body.system_prompt_enabled,
-                    "ai_name": body.ai_name, "user_name": body.user_name})
+    current = load_worldbook()
+    payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
+    current.update(payload)
+    save_worldbook(current)
     return {"ok": True}
 
 # ── 聊天状态 ──────────────────────────────────────
