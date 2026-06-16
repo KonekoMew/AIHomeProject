@@ -205,7 +205,7 @@ MODELS = {
     "DS-V4-Flash":     {"provider": "aipro", "model": "deepseek-v4-flash", "vision": False},
     "CLI-3.1pro":       {"provider": "gemini_cli", "model": "gemini-3.1-pro-preview", "vision": True},
     # ChatGPT-auth Codex does not support some Codex-only defaults, so pin a
-    # model that works after account switches.
+    # model that works after account switches..
     "Codex":            {"provider": "codex_cli",  "model": "gpt-5.5", "vision": True},
     "AGY-3.5flash":        {"provider": "antigravity_cli", "model": "Gemini 3.5 Flash (Medium)", "vision": True},
     "AGY-3.1pro":          {"provider": "antigravity_cli", "model": "Gemini 3.1 Pro (High)", "vision": True},

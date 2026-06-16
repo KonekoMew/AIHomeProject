@@ -44,7 +44,7 @@ THEATER_ITEM_PATTERN = re.compile(r'\[剧场道具[：:]([^\]]+)\]')
 _SYSTEM_MSG_CONTEXT_KEYWORDS = ('查看了监控', '搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话')
 from context_builder import (
     fetch_merged_timeline, render_merged_timeline, build_health_summary,
-    format_ability_block, WISH_CMD_PATTERN,
+    format_ability_block, WISH_CMD_PATTERN, _build_recall_query,
 )
 from music import search_songs, get_audio_url
 from schedule import process_schedule_commands, get_active_schedules, build_schedule_prompt
@@ -924,8 +924,13 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     topic = digest_result.get("topic", "")
     is_search_needed = digest_result.get("is_search_needed", False)
 
-    recall_query = f"{topic} {' '.join(recall_keywords)}" if topic else f"{body.content[:200]} {' '.join(recall_keywords)}"
-    recall_query = recall_query.strip()
+    recall_query = _build_recall_query(
+        topic,
+        recall_keywords,
+        query_text=body.content,
+        recent_messages=actual_recent,
+        status=digest_result.get("status", ""),
+    )
 
     async def _do_surfacing():
         return await build_surfacing_memories(topic, recall_keywords)
@@ -1499,8 +1504,13 @@ async def send_message(conv_id: str, body: MsgCreate):
         is_search_needed = digest_result.get("is_search_needed", False)
 
         # 3. 并行执行：背景记忆浮现 + 向量召回（两者都只依赖 instant_digest 的结果，互不依赖）
-        recall_query = f"{topic} {' '.join(recall_keywords)}" if topic else f"{body.content[:200]} {' '.join(recall_keywords)}"
-        recall_query = recall_query.strip()
+        recall_query = _build_recall_query(
+            topic,
+            recall_keywords,
+            query_text=body.content,
+            recent_messages=actual_recent,
+            status=digest_result.get("status", ""),
+        )
 
         async def _do_surfacing():
             return await build_surfacing_memories(topic, recall_keywords)
@@ -2538,16 +2548,13 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         inject_offset += 2
 
         # 4. RAG 精确召回（与背景记忆去重）
-        if topic:
-            recall_query = f"{topic} {' '.join(recall_keywords)}"
-        else:
-            last_user_content = ""
-            for m in reversed(history):
-                if m["role"] == "user" and not m["content"].startswith("["):
-                    last_user_content = m["content"][:200]
-                    break
-            recall_query = f"{last_user_content} {' '.join(recall_keywords)}"
-        recall_query = recall_query.strip()
+        recall_query = _build_recall_query(
+            topic,
+            recall_keywords,
+            query_text=body.content,
+            recent_messages=actual_recent,
+            status=digest_result.get("status", ""),
+        )
 
         if recall_query:
             _, debug_top6 = await recall_memories(recall_query, query_keywords=recall_keywords)

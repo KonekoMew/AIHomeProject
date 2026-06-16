@@ -2,7 +2,7 @@
 向量记忆库：embedding、recall、手动总结、即时哨兵（RAG 路由）
 """
 
-import json, time, struct, math, asyncio
+import json, time, struct, math, asyncio, re
 from datetime import datetime
 
 import aiosqlite, httpx
@@ -377,6 +377,19 @@ async def build_surfacing_memories(topic: str = "", keywords: list[str] = None,
 
 
 # ── 哨兵/前置模型统一调用 ────────────────────────
+def _extract_gemini_final_text(data: dict) -> str:
+    """Return visible Gemini output while skipping Gemma thinking parts."""
+    parts = data["candidates"][0]["content"].get("parts", [])
+    visible = [
+        part.get("text", "")
+        for part in parts
+        if part.get("text") and not part.get("thought")
+    ]
+    if not visible:
+        visible = [part.get("text", "") for part in parts if part.get("text")]
+    return "\n".join(text.strip() for text in visible if text.strip()).strip()
+
+
 async def _call_sentinel_text(scfg: dict, prompt: str, timeout: int = 60) -> str | None:
     """统一调用哨兵模型（纯文本），支持 Gemini 原生和 OpenAI 兼容格式"""
     if scfg["use_openai"]:
@@ -410,7 +423,7 @@ async def _call_sentinel_text(scfg: dict, prompt: str, timeout: int = 60) -> str
             resp = await client.post(url, json={"contents": contents, "safetySettings": safety_settings})
             resp.raise_for_status()
             data = resp.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return _extract_gemini_final_text(data)
 
 
 async def _call_sentinel_vision(scfg: dict, prompt: str, img_b64: str, mime_type: str = "image/jpeg", timeout: int = 60) -> str | None:
@@ -452,10 +465,41 @@ async def _call_sentinel_vision(scfg: dict, prompt: str, img_b64: str, mime_type
             resp = await client.post(url, json={"contents": contents, "safetySettings": safety_settings})
             resp.raise_for_status()
             data = resp.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return _extract_gemini_final_text(data)
 
 
 # ── 即时哨兵：每次用户发消息后触发（RAG 路由） ────
+_MEMORY_REFERENCE_RE = re.compile(
+    r"(昨天|前天|上次|之前|以前|刚才|那天|前几天|还记得|记不记得|"
+    r"看过|听过|说过|聊过|讲过|做过|吃过|买过|去过)"
+)
+_DETAIL_REQUEST_RE = re.compile(
+    r"(讲的啥|讲什么|说的啥|叫什么|叫啥|名字|细节|具体|哪|什么|怎么|为什么|大概|内容)"
+)
+
+
+def _latest_user_text(recent_messages: list[dict]) -> str:
+    for msg in reversed(recent_messages or []):
+        if msg.get("role") == "user":
+            return str(msg.get("content") or "").strip()
+    if recent_messages:
+        return str(recent_messages[-1].get("content") or "").strip()
+    return ""
+
+
+def _fallback_digest_topic(text: str, keywords: list[str]) -> str:
+    keyword_text = "、".join(str(k).strip() for k in (keywords or []) if str(k).strip())
+    if keyword_text:
+        return f"当前话题：{keyword_text}"
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    text = re.sub(r"\[\[image:[^\]]+\]\]", "", text).strip()
+    if not text:
+        return "当前对话的记忆线索"
+    if _MEMORY_REFERENCE_RE.search(text):
+        return "询问过往对话或经历中的具体内容"
+    return "当前闲聊话题"
+
+
 async def instant_digest(recent_messages: list[dict]) -> dict:
     """
     用户每次发消息后即时调用 flash-lite，返回结构化 JSON：
@@ -480,16 +524,16 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
         f"1. 忽略高频对话称呼：不要提取对话者的名字或昵称（如 \"{ai_name}\", \"{user_name}\", \"小鬣狗\", \"老公\", \"宝贝\"）作为关键词。\n"
         f"2. 忽略高频常用词：如\"晚安故事\",\"吃什么\"等。\n"
         f"3. 聚焦核心实体：只提取稀缺的、具有区分度的名词（地点、物品、特定事件、专有名词等）\n"
-        f"4. 仅当提起之前做过的事、过去的回忆时，is_search_needed才输出为true。若在询问日常问题，不涉及回忆过去，is_search_needed输出为false。\n"
+        f"4. 判断是否需要搜索记忆。只要用户在问过去发生/看过/聊过/吃过/做过/提过的内容，或需要你回忆上下文事实，is_search_needed 必须为 true。\n"
         f"   \"is_search_needed\": Boolean.\n"
-        f"      - false: 纯闲聊/语气词/无实质内容，只是在陈述或表达感情，并未进行对于具体事实的询问则输出false。\n"
-        f"      - true: 当包含询问、回忆、或需要背景信息的对话，提起“昨天”、“之前”、“你还记得……”等。\n"
-        f"   \"keywords\": 提取 2-4 个搜索关键词（过滤掉 {ai_name}, {user_name} 等高频人名）。\n"
+        f"      - false: 只有纯闲聊、语气词、情绪表达，且不需要任何过去事实/上下文背景时才为 false。\n"
+        f"      - true: 出现“昨天/前天/上次/之前/刚才/那天/看过/聊过/吃过/叫什么/讲的啥/还记得”等过去线索或事实追问时必须为 true。\n"
+        f"   \"keywords\": 提取 2-5 个搜索关键词（过滤掉 {ai_name}, {user_name} 等高频人名）。如果没有专名，也要提取当前问题里的对象词、事件类型词或行为词，不要编造对话里没出现的词。\n"
         f"   \"require_detail\": Boolean.\n"
         f"      - false: 模糊回忆/情感抒发（只需读取摘要）。\n"
-        f"      - true: 当且仅当询问具体事实/细节/步骤（需要读取正文），例如：还记得我们之前…你记得上次…等。\n"
+        f"      - true: 当询问具体事实/细节/名字/剧情/步骤/时间线（需要读取正文）时为 true，例如“前天看的电影讲的啥”“那个叫什么”“具体怎么说的”。\n"
         f"5. \"status\": 结合上下文总结{user_name}当前所处的状态（如：{user_name}刚吃完晚饭准备出门、洗完澡准备睡觉、回到家开始工作了等）。\n"
-        f"6. \"topic\": 用一两句话概括当前对话可能会涉及到的回忆（如：在聊中午吃什么，在聊之前看过的电影）。若无明确话题则留空。\n\n"
+        f"6. \"topic\": 必须输出一个 8-40 字的检索话题摘要，永远不要留空。不要复制整句原话；要概括成短查询，例如“询问某次看过内容的剧情”“回忆之前提到的食物”等。\n\n"
         f"严格只输出一个 JSON 对象，不要输出任何其他内容。\n\n"
         f"对话：\n{messages_text}"
     )
@@ -519,6 +563,14 @@ async def instant_digest(recent_messages: list[dict]) -> dict:
             await manager.broadcast({"type": "chat_status", "data": {"status": status, "updated_at": time.time()}})
 
         topic = str(result.get("topic", "")).strip()
+        latest_user = _latest_user_text(recent_messages)
+        if latest_user:
+            if _MEMORY_REFERENCE_RE.search(latest_user):
+                is_search = True
+            if _DETAIL_REQUEST_RE.search(latest_user):
+                require_detail = True
+        if not topic:
+            topic = _fallback_digest_topic(latest_user, keywords)
 
         return {
             "is_search_needed": is_search,

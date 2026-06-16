@@ -364,6 +364,42 @@ def _memory_debug_item(mem: dict, max_content: int = 200) -> dict:
     }
 
 
+def _clean_recall_snippet(text: str, max_len: int = 80) -> str:
+    text = META_TAG_PATTERN.sub("", str(text or ""))
+    text = re.sub(r"\[\[image:[^\]]+\]\]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_len]
+
+
+def _build_recall_query(
+    topic: str,
+    keywords: list,
+    query_text: str = "",
+    recent_messages: list[dict] = None,
+    status: str = "",
+) -> str:
+    """Build the vector-search query from a topic digest instead of a raw last message."""
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in re.split(r"[,，、\s]+", keywords) if k.strip()]
+    keyword_text = " ".join(str(k).strip() for k in (keywords or []) if str(k).strip())
+
+    base = str(topic or "").strip()
+    base_from_keywords = False
+    if not base:
+        base = str(status or "").strip()
+    if not base and keyword_text:
+        base = f"当前话题：{keyword_text}"
+        base_from_keywords = True
+    if not base:
+        base = "当前对话的记忆线索"
+
+    if base_from_keywords:
+        return base.strip()
+    if keyword_text and keyword_text in base:
+        return base.strip()
+    return f"{base} {keyword_text}".strip()
+
+
 async def build_memory_blocks(
     query_text: str,
     recent_messages: list[dict] = None,
@@ -414,14 +450,16 @@ async def build_memory_blocks(
 
     recall_keywords = digest_result.get("keywords", [])
     topic = digest_result.get("topic", "")
+    status = digest_result.get("status", "")
     is_search_needed = digest_result.get("is_search_needed", False)
 
-    recall_query = ""
-    if topic:
-        recall_query = f"{topic} {' '.join(recall_keywords)}"
-    elif query_text:
-        recall_query = f"{query_text[:200]} {' '.join(recall_keywords)}"
-    recall_query = recall_query.strip()
+    recall_query = _build_recall_query(
+        topic,
+        recall_keywords,
+        query_text=query_text,
+        recent_messages=recent_messages,
+        status=status,
+    )
 
     # 并行执行：背景浮现 + 向量召回 + 聊天室记忆
     surfaced = []
