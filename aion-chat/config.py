@@ -13,6 +13,8 @@ DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = DATA_DIR / "chat.db"
 UPLOADS_DIR = DATA_DIR / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)
+SONGS_DIR = DATA_DIR / "songs"
+SONGS_DIR.mkdir(exist_ok=True)
 CODEX_UPLOADS_DIR = BASE_DIR.parent / "Connor-Codex" / "uploads"
 CODEX_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 CHATS_DIR = DATA_DIR / "chats"
@@ -196,7 +198,6 @@ def sanitize_filename(name):
 # ── 模型配置 ─────────────────────────────────────
 MODELS = {
     "硅基GLM-5.1":      {"provider": "siliconflow", "model": "Pro/zai-org/GLM-5.1", "vision": False},
-    "硅基GLM-5.0":      {"provider": "siliconflow", "model": "Pro/zai-org/GLM-5", "vision": False},
     "Kimi-K2.6":      {"provider": "siliconflow", "model": "Pro/moonshotai/Kimi-K2.6", "vision": True},
     "Gemini-3.5-flash":  {"provider": "gemini", "model": "gemini-3.5-flash", "vision": True},
     "Gemini-3.1-pro":  {"provider": "gemini", "model": "gemini-3.1-pro-preview", "vision": True},
@@ -206,7 +207,6 @@ MODELS = {
     # ChatGPT-auth Codex does not support some Codex-only defaults, so pin a
     # model that works after account switches.
     "Codex":            {"provider": "codex_cli",  "model": "gpt-5.5", "vision": True},
-    "Antigravity":        {"provider": "antigravity_cli", "model": "", "vision": True},
     "AGY-3.5flash":        {"provider": "antigravity_cli", "model": "Gemini 3.5 Flash (Medium)", "vision": True},
     "AGY-3.1pro":          {"provider": "antigravity_cli", "model": "Gemini 3.1 Pro (High)", "vision": True},
     "AGY-Claude-Opus-4.6": {"provider": "antigravity_cli", "model": "Claude Opus 4.6 (Thinking)", "vision": True},

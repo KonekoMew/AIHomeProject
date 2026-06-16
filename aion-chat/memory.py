@@ -606,7 +606,7 @@ async def _get_active_model_and_conv() -> tuple[str, str | None]:
     return DEFAULT_MODEL, None
 
 
-async def _do_digest(min_messages: int = 0) -> dict:
+async def _do_digest(min_messages: int = 0, allow_ai_wishes: bool = False) -> dict:
     """
     核心总结逻辑，manual_digest 和 auto_digest 共用。
     min_messages: 最低消息数阈值，0=不限制（手动），20=自动
@@ -956,22 +956,60 @@ async def _do_digest(min_messages: int = 0) -> dict:
         except Exception as e:
             print(f"[digest] 礼物判断失败: {e}")
 
+    ai_wish_created = False
+    if allow_ai_wishes and total_new > 0 and all_summaries:
+        try:
+            if not context_msgs:
+                context_msgs = [
+                    {"role": m["role"], "content": m["content"][:300]}
+                    for m in new_msgs[-30:]
+                    if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()
+                ]
+            context_text = "\n".join(
+                f"{item.get('role', 'message')}: {str(item.get('content') or '')[:300]}"
+                for item in context_msgs[-30:]
+            )
+
+            async def _generate_wish_text(prompt: str):
+                return await simple_ai_call([{"role": "user", "content": prompt}], model_key)
+
+            from wish_pool import maybe_create_ai_digest_wish
+
+            wish_result = await maybe_create_ai_digest_wish(
+                actor="aion",
+                actor_name=ai_name,
+                user_name=user_name,
+                summaries=all_summaries,
+                context_text=context_text,
+                persona_block=persona_block,
+                source_ref=conv_id or "",
+                source_start_ts=new_msgs[0]["created_at"],
+                source_end_ts=new_msgs[-1]["created_at"],
+                generate_text=_generate_wish_text,
+            )
+            ai_wish_created = bool(wish_result.get("created"))
+            if ai_wish_created:
+                print(f"[digest] AI wish created: {wish_result.get('wish', {}).get('id', '')}")
+        except Exception as e:
+            print(f"[digest] wish decision failed: {e}")
+
     return {
         "ok": True,
         "message": f"总结完成：处理了 {len(new_msgs)} 条消息（{len(groups)} 组），生成了 {total_new} 条新记忆",
         "new_memories_count": total_new,
         "processed_messages": len(new_msgs),
+        "ai_wish_created": ai_wish_created,
     }
 
 
 async def manual_digest() -> dict:
     """手动触发记忆总结（无最低条数限制）"""
-    return await _do_digest(min_messages=0)
+    return await _do_digest(min_messages=0, allow_ai_wishes=False)
 
 
 async def auto_digest() -> dict:
     """自动定时记忆总结（至少 30 条未总结消息才执行）"""
-    return await _do_digest(min_messages=30)
+    return await _do_digest(min_messages=30, allow_ai_wishes=True)
 
 
 async def _ensure_daily_compression_schema():

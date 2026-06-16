@@ -1,0 +1,1124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>许愿池</title>
+<link rel="stylesheet" href="/static/common.css">
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#07143a">
+<style>
+:root {
+  --bg: #04102c;
+}
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: #04102c;
+}
+body {
+  background: #04102c;
+  color: #f8fbff;
+  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  letter-spacing: 0;
+}
+button, input, textarea, select {
+  font: inherit;
+}
+.wish-page {
+  position: fixed;
+  inset: 0;
+  min-height: 100dvh;
+  overflow: hidden;
+  background: #04102c url('/public/许愿许愿池底图.png') center/cover no-repeat;
+  isolation: isolate;
+}
+.wish-page::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(70, 222, 255, 0.12), transparent 26%),
+    linear-gradient(180deg, rgba(2, 6, 24, 0.14) 0%, rgba(2, 6, 24, 0.06) 38%, rgba(1, 5, 18, 0.52) 74%, rgba(1, 4, 14, 0.90) 100%);
+}
+.wish-page::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(3, 9, 28, 0.36), transparent 20%, transparent 80%, rgba(3, 9, 28, 0.36)),
+    radial-gradient(circle at 50% 36%, transparent 0 24%, rgba(56, 217, 255, 0.11) 25%, transparent 39%);
+}
+.wish-chrome {
+  position: relative;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: max(16px, env(safe-area-inset-top)) 16px 0;
+}
+html.aion-app.aion-iframe .wish-chrome {
+  padding-top: calc(env(safe-area-inset-top, 0px) + 42px);
+}
+.wish-icon-btn {
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(197, 224, 255, 0.32);
+  border-radius: 50%;
+  background: rgba(10, 23, 64, 0.38);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.22), inset 0 1px 1px rgba(255,255,255,0.12);
+  backdrop-filter: blur(14px) saturate(1.35);
+  -webkit-backdrop-filter: blur(14px) saturate(1.35);
+  cursor: pointer;
+}
+.wish-icon-btn:active {
+  transform: scale(0.96);
+}
+.wish-book-btn {
+  width: auto;
+  min-width: 82px;
+  border-radius: 999px;
+  padding: 0 16px;
+  font-size: 13px;
+  font-weight: 700;
+}
+.wish-title {
+  position: relative;
+  z-index: 2;
+  margin-top: clamp(28px, 6dvh, 76px);
+  text-align: center;
+  color: #fffaf0;
+  text-shadow: 0 0 18px rgba(255, 230, 184, 0.74), 0 5px 24px rgba(0,0,0,0.62);
+}
+.wish-title h1 {
+  margin: 0;
+  font-size: clamp(48px, 15vw, 78px);
+  line-height: 1;
+  font-family: "STSong", "Songti SC", "Noto Serif SC", serif;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+.wish-title p {
+  margin-top: 18px;
+  font-size: clamp(15px, 4vw, 20px);
+  color: rgba(235, 242, 255, 0.92);
+  text-shadow: 0 0 12px rgba(45, 112, 255, 0.78);
+}
+.wish-pool-focus {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  width: min(78vw, 380px);
+  aspect-ratio: 1 / 0.58;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  border-radius: 50%;
+}
+.wish-pool-focus::before,
+.wish-pool-focus::after {
+  content: "";
+  position: absolute;
+  inset: 14%;
+  border-radius: 50%;
+  border: 1px solid rgba(151, 244, 255, 0.28);
+  opacity: 0;
+  transform: scale(0.65);
+}
+.wish-pool-focus.rippling::before {
+  animation: wishRipple 1.2s ease-out;
+}
+.wish-pool-focus.rippling::after {
+  animation: wishRipple 1.2s ease-out 0.2s;
+}
+@keyframes wishRipple {
+  0% { opacity: 0.92; transform: scale(0.52); }
+  100% { opacity: 0; transform: scale(1.58); }
+}
+.wish-actions {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: max(36px, env(safe-area-inset-bottom));
+  width: min(76vw, 360px);
+  transform: translateX(-50%);
+  display: grid;
+  gap: 14px;
+}
+.wish-fancy-btn {
+  position: relative;
+  min-height: 64px;
+  border: 0;
+  color: #fff;
+  background: transparent;
+  cursor: pointer;
+  text-align: center;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding-bottom: 6px;
+  font-size: clamp(20px, 5.8vw, 28px);
+  line-height: 1;
+  font-family: "STSong", "Songti SC", "Noto Serif SC", serif;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-shadow: 0 2px 10px rgba(0,0,0,0.48), 0 0 12px rgba(255,255,255,0.52);
+}
+.wish-fancy-btn::before {
+  content: "";
+  position: absolute;
+  inset: -12px -20px;
+  z-index: -1;
+  background: url('/public/wish-button-clean.png') center/100% 100% no-repeat;
+  filter: drop-shadow(0 0 18px rgba(160, 141, 255, 0.54));
+}
+.wish-fancy-btn.secondary::before {
+  opacity: 0.78;
+  filter: hue-rotate(18deg) saturate(0.86) drop-shadow(0 0 16px rgba(111, 166, 255, 0.42));
+}
+.wish-fancy-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.wish-fancy-btn:active {
+  transform: scale(0.985);
+}
+.wish-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  align-items: flex-end;
+  justify-content: center;
+  padding: max(22px, env(safe-area-inset-top)) 14px max(16px, env(safe-area-inset-bottom));
+  background: rgba(0, 4, 18, 0.46);
+  backdrop-filter: blur(12px) saturate(1.25);
+  -webkit-backdrop-filter: blur(12px) saturate(1.25);
+}
+.wish-overlay.show {
+  display: flex;
+}
+.wish-scene-overlay {
+  align-items: center;
+}
+.wish-scene-panel {
+  position: relative;
+  width: min(564px, calc(100vw - 28px), calc((100dvh - 32px) * 0.865));
+  aspect-ratio: 564 / 652;
+  color: #fdfdff;
+  background: url('/public/许愿图片.png') center/100% 100% no-repeat;
+  filter: drop-shadow(0 22px 46px rgba(0, 0, 0, 0.42));
+}
+.wish-scene-close {
+  position: absolute;
+  top: 10.8%;
+  right: 7.6%;
+  z-index: 3;
+  width: 8.4%;
+  aspect-ratio: 1;
+  border: 1px solid rgba(218, 229, 255, 0.48);
+  border-radius: 50%;
+  background: rgba(9, 18, 54, 0.32);
+  color: rgba(255, 255, 255, 0.84);
+  display: grid;
+  place-items: center;
+  font-size: clamp(22px, 5.2vw, 30px);
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: inset 0 0 10px rgba(255,255,255,0.10), 0 0 14px rgba(124, 158, 255, 0.24);
+}
+.wish-scene-close:active {
+  transform: scale(0.95);
+}
+.wish-scene-title {
+  position: absolute;
+  top: 14.5%;
+  left: 12%;
+  right: 12%;
+  text-align: center;
+  color: #fffdf0;
+  font-family: "STSong", "Songti SC", "Noto Serif SC", serif;
+  font-size: clamp(24px, 6.6vw, 36px);
+  font-weight: 800;
+  line-height: 1.12;
+  text-shadow: 0 0 12px rgba(255, 239, 203, 0.82), 0 4px 16px rgba(0,0,0,0.46);
+}
+.wish-scene-content {
+  position: absolute;
+  left: 9.8%;
+  right: 9.8%;
+  top: 25.7%;
+  height: 37.7%;
+  box-sizing: border-box;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: clamp(12px, 3.4vw, 18px);
+}
+.wish-result-meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+  max-height: 58px;
+  overflow: hidden;
+  color: rgba(227, 237, 255, 0.76);
+  font-size: clamp(11px, 2.8vw, 14px);
+}
+.wish-result-meta b {
+  color: rgba(255, 252, 235, 0.92);
+  font-weight: 700;
+}
+.wish-result-text {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow-y: auto;
+  padding: 10px 8px 2px;
+  text-align: center;
+  color: #fff;
+  font-family: "STSong", "Songti SC", "Noto Serif SC", serif;
+  font-size: clamp(18px, 4.5vw, 25px);
+  font-weight: 700;
+  line-height: 1.62;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  text-shadow: 0 0 12px rgba(184, 215, 255, 0.34), 0 3px 14px rgba(0,0,0,0.44);
+}
+.wish-scene-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: rgba(232, 240, 255, 0.82);
+  font-size: clamp(18px, 4.8vw, 24px);
+  line-height: 1.55;
+}
+.wish-scene-empty span {
+  display: block;
+  margin-top: 4px;
+  color: rgba(223, 234, 255, 0.58);
+  font-size: 13px;
+}
+.wish-scene-primary {
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  top: 71.1%;
+  height: 10.5%;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  text-align: center;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  padding-bottom: 5px;
+  font-family: "STSong", "Songti SC", "Noto Serif SC", serif;
+  font-size: clamp(20px, 5.6vw, 30px);
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-shadow: 0 0 11px rgba(255,255,255,0.62), 0 4px 14px rgba(0,0,0,0.44);
+}
+.wish-scene-primary:disabled {
+  opacity: 0.46;
+  cursor: wait;
+}
+.wish-scene-primary:active:not(:disabled) {
+  transform: scale(0.985);
+}
+.wish-implement-sheet {
+  position: absolute;
+  z-index: 4;
+  left: 17%;
+  right: 17%;
+  top: 55.8%;
+  display: none;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid rgba(192, 220, 255, 0.24);
+  border-radius: 14px;
+  background: rgba(5, 14, 45, 0.72);
+  box-shadow: 0 14px 28px rgba(0,0,0,0.28), inset 0 1px 1px rgba(255,255,255,0.10);
+  backdrop-filter: blur(14px) saturate(1.25);
+  -webkit-backdrop-filter: blur(14px) saturate(1.25);
+}
+.wish-implement-sheet.show {
+  display: grid;
+}
+.wish-implement-option {
+  min-height: 30px;
+  border: 1px solid rgba(197, 224, 255, 0.20);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.10);
+  color: rgba(250,253,255,0.92);
+  cursor: pointer;
+  font-size: clamp(12px, 3vw, 14px);
+  font-weight: 800;
+  line-height: 1.1;
+}
+.wish-implement-option:disabled {
+  opacity: 0.52;
+  cursor: wait;
+}
+.wish-implement-option:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.wish-scene-cancel,
+.wish-scene-foot-actions {
+  position: absolute;
+  left: 18%;
+  right: 18%;
+  top: 85.6%;
+  min-height: 30px;
+}
+.wish-scene-cancel {
+  border: 0;
+  background: transparent;
+  color: rgba(229, 236, 255, 0.66);
+  cursor: pointer;
+  font-size: clamp(14px, 3.6vw, 18px);
+  letter-spacing: 0;
+}
+.wish-scene-foot-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(18px, 6vw, 42px);
+}
+.wish-scene-link {
+  border: 0;
+  background: transparent;
+  color: rgba(229, 236, 255, 0.72);
+  cursor: pointer;
+  font-size: clamp(13px, 3.4vw, 17px);
+}
+.wish-scene-link.danger {
+  color: rgba(255, 218, 229, 0.78);
+}
+.wish-scene-link:active,
+.wish-scene-cancel:active {
+  transform: scale(0.97);
+}
+.wish-scene-content.form {
+  padding-top: clamp(16px, 4vw, 24px);
+}
+.wish-scene-textarea {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  outline: none;
+  resize: none;
+  padding: 0 8px 28px;
+  font-size: clamp(15px, 3.8vw, 19px);
+  line-height: 1.62;
+}
+.wish-scene-textarea::placeholder {
+  color: rgba(210, 221, 250, 0.46);
+}
+.wish-char-count {
+  position: absolute;
+  right: clamp(16px, 4vw, 22px);
+  bottom: clamp(10px, 2.8vw, 16px);
+  color: rgba(223, 232, 255, 0.66);
+  font-size: clamp(13px, 3.2vw, 17px);
+}
+.wish-panel {
+  width: min(560px, 100%);
+  max-height: min(82dvh, 760px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(183, 216, 255, 0.32);
+  border-radius: 18px 18px 14px 14px;
+  background:
+    linear-gradient(180deg, rgba(62, 82, 159, 0.36), rgba(8, 17, 54, 0.86)),
+    rgba(7, 15, 48, 0.94);
+  box-shadow: 0 -14px 46px rgba(0,0,0,0.34), inset 0 1px 1px rgba(255,255,255,0.14);
+  color: #f9fbff;
+  overflow: hidden;
+}
+.wish-panel.compact {
+  max-width: 500px;
+}
+.wish-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid rgba(183, 216, 255, 0.14);
+}
+.wish-panel-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 800;
+}
+.wish-close {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.10);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+}
+.wish-panel-body {
+  overflow-y: auto;
+  padding: 14px;
+}
+.wish-card {
+  border: 1px solid rgba(178, 221, 255, 0.26);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(90, 236, 255, 0.14), transparent 38%),
+    linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04)),
+    rgba(12, 27, 75, 0.72);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,0.13), 0 16px 36px rgba(0,0,0,0.18);
+  padding: 14px;
+}
+.wish-card + .wish-card {
+  margin-top: 10px;
+}
+.wish-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  color: rgba(224, 236, 255, 0.78);
+  font-size: 12px;
+}
+.wish-badge {
+  border: 1px solid rgba(150, 232, 255, 0.30);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: rgba(75, 232, 255, 0.12);
+  color: #d6fbff;
+  font-weight: 700;
+}
+.wish-badge.aion {
+  border-color: rgba(117, 255, 210, 0.34);
+  background: rgba(83, 255, 206, 0.12);
+  color: #c9fff1;
+}
+.wish-badge.connor {
+  border-color: rgba(177, 166, 255, 0.38);
+  background: rgba(143, 127, 255, 0.14);
+  color: #e4e0ff;
+}
+.wish-badge.user {
+  border-color: rgba(255, 204, 132, 0.42);
+  background: rgba(255, 184, 93, 0.14);
+  color: #fff0cf;
+}
+.wish-content {
+  font-size: 15px;
+  line-height: 1.68;
+  color: #ffffff;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.wish-card.result .wish-content {
+  font-size: 20px;
+  text-align: center;
+  padding: 12px 6px 8px;
+  font-family: "STSong", "Songti SC", "Noto Serif SC", serif;
+}
+.wish-actions-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+.wish-small-btn {
+  border: 1px solid rgba(196, 224, 255, 0.22);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.10);
+  color: #f8fbff;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.wish-small-btn.primary {
+  border-color: rgba(151, 245, 255, 0.42);
+  background: linear-gradient(135deg, rgba(70, 205, 255, 0.34), rgba(139, 112, 255, 0.32));
+}
+.wish-small-btn.danger {
+  border-color: rgba(255, 134, 166, 0.34);
+  color: #ffd8e3;
+}
+.wish-small-btn:active {
+  transform: scale(0.98);
+}
+.wish-form-grid {
+  display: grid;
+  gap: 12px;
+}
+.wish-field label,
+.wish-author-title {
+  display: block;
+  margin-bottom: 6px;
+  color: rgba(223, 236, 255, 0.74);
+  font-size: 12px;
+  font-weight: 700;
+}
+.wish-author-choices {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.wish-author-choice {
+  min-width: 0;
+  border: 1px solid rgba(196, 224, 255, 0.20);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(248,251,255,0.82);
+  padding: 9px 8px;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wish-author-choice.active {
+  border-color: rgba(153, 240, 255, 0.52);
+  background: rgba(95, 203, 255, 0.20);
+  color: #fff;
+}
+.wish-input,
+.wish-select {
+  width: 100%;
+  border: 1px solid rgba(196, 224, 255, 0.24);
+  border-radius: 12px;
+  background: rgba(3, 12, 40, 0.48);
+  color: #fff;
+  outline: none;
+  padding: 11px 12px;
+  font-size: 14px;
+}
+.wish-input:focus,
+.wish-select:focus {
+  border-color: rgba(146, 238, 255, 0.56);
+  box-shadow: 0 0 0 3px rgba(89, 209, 255, 0.12);
+}
+.wish-input {
+  min-height: 128px;
+  resize: vertical;
+  line-height: 1.65;
+}
+.wish-select option {
+  background: #111b48;
+  color: #fff;
+}
+.wish-book-tools {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+  padding: 12px 14px 4px;
+}
+.wish-filter {
+  border: 1px solid rgba(196, 224, 255, 0.20);
+  border-radius: 999px;
+  background: rgba(255,255,255,0.08);
+  color: rgba(248,251,255,0.76);
+  padding: 8px 7px;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.wish-filter.active {
+  border-color: rgba(153, 240, 255, 0.52);
+  background: rgba(95, 203, 255, 0.20);
+  color: #fff;
+}
+.wish-empty {
+  padding: 46px 12px;
+  color: rgba(226, 237, 255, 0.70);
+  text-align: center;
+  font-size: 14px;
+}
+.wish-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.wish-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.wish-mini-icon {
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.08);
+  color: rgba(248,251,255,0.84);
+  cursor: pointer;
+}
+.wish-mini-icon.danger {
+  color: #ffd2de;
+}
+.wish-counts {
+  color: rgba(224, 236, 255, 0.68);
+  font-size: 12px;
+}
+@media (max-width: 420px) {
+  .wish-title {
+    margin-top: 24px;
+  }
+  .wish-actions {
+    width: 78vw;
+    gap: 12px;
+  }
+  .wish-fancy-btn {
+    min-height: 56px;
+    font-size: 21px;
+  }
+  .wish-book-tools {
+    gap: 5px;
+  }
+  .wish-filter {
+    padding-inline: 4px;
+    font-size: 11px;
+  }
+}
+</style>
+</head>
+<body data-theme="dark" data-gift-popup="disabled">
+<main class="wish-page">
+  <div class="wish-chrome">
+    <button class="wish-icon-btn" type="button" onclick="goBack()" aria-label="返回">‹</button>
+    <button class="wish-icon-btn wish-book-btn" type="button" onclick="openBook()">愿望册</button>
+  </div>
+
+  <section class="wish-title">
+    <h1>许愿池</h1>
+    <p>把心愿轻轻诉说，让世界温柔以待</p>
+  </section>
+
+  <div class="wish-pool-focus" id="wishPoolFocus"></div>
+
+  <div class="wish-actions">
+    <button class="wish-fancy-btn" type="button" id="drawWishBtn" onclick="drawOneWish()">捞起一个愿望</button>
+    <button class="wish-fancy-btn secondary" type="button" onclick="openWishForm()">许下一个愿望</button>
+  </div>
+</main>
+
+<div class="wish-overlay wish-scene-overlay" id="wishResultOverlay" onclick="overlayClose(event, 'wishResultOverlay')">
+  <div class="wish-scene-panel" role="dialog" aria-modal="true" aria-labelledby="wishResultTitle">
+    <button class="wish-scene-close" type="button" onclick="closeOverlay('wishResultOverlay')" aria-label="关闭">×</button>
+    <div class="wish-scene-title" id="wishResultTitle">捞起一个愿望</div>
+    <div class="wish-scene-content" id="wishResultBody"></div>
+    <button class="wish-scene-primary" type="button" id="wishResultImplementBtn" onclick="toggleImplementChoices()">去实现</button>
+    <div class="wish-implement-sheet" id="wishImplementSheet">
+      <button class="wish-implement-option" type="button" data-target="aion" onclick="announceCurrentWish('aion')">告诉AI</button>
+      <button class="wish-implement-option" type="button" data-target="connor" onclick="announceCurrentWish('connor')">告诉第二位AI</button>
+      <button class="wish-implement-option" type="button" data-target="group" onclick="announceCurrentWish('group')">告诉群里</button>
+    </div>
+    <div class="wish-scene-foot-actions">
+      <button class="wish-scene-link" type="button" onclick="closeOverlay('wishResultOverlay')">放回池中</button>
+      <button class="wish-scene-link" type="button" id="wishResultCompleteBtn" onclick="changeCurrentWish('fulfilled')">已完成</button>
+    </div>
+  </div>
+</div>
+
+<div class="wish-overlay wish-scene-overlay" id="wishFormOverlay" onclick="overlayClose(event, 'wishFormOverlay')">
+  <form class="wish-scene-panel wish-scene-form" role="dialog" aria-modal="true" aria-labelledby="wishFormTitle" onsubmit="saveWish(event)">
+    <button class="wish-scene-close" type="button" onclick="closeOverlay('wishFormOverlay')" aria-label="关闭">×</button>
+    <div class="wish-scene-title" id="wishFormTitle">许下一个愿望</div>
+    <div class="wish-scene-content form">
+      <textarea class="wish-scene-textarea" id="wishContent" maxlength="100" autocomplete="off" placeholder="写下你的愿望..." required></textarea>
+      <div class="wish-char-count" id="wishCharCount">0/100</div>
+    </div>
+    <button class="wish-scene-primary" type="submit" id="wishSaveBtn">投下愿望</button>
+    <button class="wish-scene-cancel" type="button" onclick="closeOverlay('wishFormOverlay')">取消</button>
+  </form>
+</div>
+
+<div class="wish-overlay" id="wishBookOverlay" onclick="overlayClose(event, 'wishBookOverlay')">
+  <div class="wish-panel">
+    <div class="wish-panel-head">
+      <div>
+        <div class="wish-panel-title">愿望册</div>
+        <div class="wish-counts" id="wishCounts"></div>
+      </div>
+      <button class="wish-close" type="button" onclick="closeOverlay('wishBookOverlay')" aria-label="关闭">×</button>
+    </div>
+    <div class="wish-book-tools">
+      <button class="wish-filter active" type="button" data-filter="all" onclick="setBookFilter('all')">全部</button>
+      <button class="wish-filter" type="button" data-filter="active" onclick="setBookFilter('active')">池中</button>
+      <button class="wish-filter" type="button" data-filter="fulfilled" onclick="setBookFilter('fulfilled')">已实现</button>
+      <button class="wish-filter" type="button" data-filter="released" onclick="setBookFilter('released')">已放下</button>
+    </div>
+    <div class="wish-panel-body" id="wishBookList"></div>
+  </div>
+</div>
+
+<script src="/static/common.js"></script>
+<script>
+const WISH_CONTENT_MAX = 100;
+const state = {
+  wishes: [],
+  counts: { all: 0, active: 0, fulfilled: 0, released: 0 },
+  actors: { user: '用户', aion: 'AI', connor: '第二位AI' },
+  selectedAuthor: 'user',
+  bookFilter: 'all',
+  currentWish: null,
+};
+
+function goBack() {
+  if (window.parent !== window && typeof window.parent.navigateToHome === 'function') {
+    window.parent.navigateToHome();
+    return;
+  }
+  if (history.length > 1) history.back();
+  else window.location.href = '/';
+}
+
+function actorName(author) {
+  return state.actors[author] || ({ user: '用户', aion: 'AI', connor: '第二位AI' }[author] || author);
+}
+
+function updateImplementLabels() {
+  const labels = {
+    aion: `告诉${actorName('aion')}`,
+    connor: `告诉${actorName('connor')}`,
+    group: '告诉群里',
+  };
+  document.querySelectorAll('.wish-implement-option').forEach(btn => {
+    const target = btn.dataset.target;
+    btn.textContent = labels[target] || btn.textContent;
+  });
+}
+
+function statusLabel(status) {
+  return { active: '池中', fulfilled: '已实现', released: '已放下' }[status] || status;
+}
+
+function timeText(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function showOverlay(id) {
+  document.getElementById(id)?.classList.add('show');
+}
+
+function closeOverlay(id) {
+  document.getElementById(id)?.classList.remove('show');
+  if (id === 'wishResultOverlay') setImplementChoices(false);
+}
+
+function overlayClose(event, id) {
+  if (event.target && event.target.id === id) closeOverlay(id);
+}
+
+async function loadActors() {
+  try {
+    const data = await api('GET', '/api/wishes/actors');
+    if (data.actors) state.actors = data.actors;
+  } catch (e) {}
+  renderAuthorChoices();
+  updateImplementLabels();
+}
+
+async function loadWishes() {
+  const data = await api('GET', '/api/wishes?status=all');
+  state.wishes = Array.isArray(data.items) ? data.items : [];
+  state.counts = data.counts || state.counts;
+  if (data.actors) state.actors = data.actors;
+  renderAuthorChoices();
+  updateImplementLabels();
+  renderBook();
+}
+
+function renderAuthorChoices() {
+  const box = document.getElementById('wishAuthorChoices');
+  if (!box) return;
+  const authors = ['user', 'aion', 'connor'];
+  box.innerHTML = authors.map(author => `
+    <button class="wish-author-choice ${state.selectedAuthor === author ? 'active' : ''}"
+      type="button" onclick="selectAuthor('${author}')" title="${escHtml(actorName(author))}">
+      ${escHtml(actorName(author))}
+    </button>
+  `).join('');
+}
+
+function selectAuthor(author) {
+  state.selectedAuthor = author;
+  renderAuthorChoices();
+}
+
+function updateWishCharCount() {
+  const input = document.getElementById('wishContent');
+  const count = document.getElementById('wishCharCount');
+  if (!input || !count) return;
+  const max = Number(input.maxLength || WISH_CONTENT_MAX);
+  count.textContent = `${input.value.length}/${max}`;
+}
+
+function openWishForm() {
+  state.selectedAuthor = 'user';
+  document.getElementById('wishContent').value = '';
+  updateWishCharCount();
+  showOverlay('wishFormOverlay');
+  setTimeout(() => document.getElementById('wishContent')?.focus(), 80);
+}
+
+async function saveWish(event) {
+  event.preventDefault();
+  const content = document.getElementById('wishContent').value.trim();
+  if (!content) return;
+  const btn = document.getElementById('wishSaveBtn');
+  btn.disabled = true;
+  try {
+    await api('POST', '/api/wishes', {
+      author: state.selectedAuthor,
+      content,
+      visibility: 'shared',
+    });
+    closeOverlay('wishFormOverlay');
+    showToast('愿望落进池里了');
+    await loadWishes();
+  } catch (e) {
+    showToast('许愿失败');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderWishCard(wish, options = {}) {
+  const author = wish.author || 'user';
+  const pulled = Number(wish.pulled_count || 0) > 0 ? `<span>捞起 ${Number(wish.pulled_count || 0)} 次</span>` : '';
+  const status = `<span>${escHtml(statusLabel(wish.status))}</span>`;
+  const origin = wish.origin === 'auto_digest' ? '<span>自动投愿</span>' : '';
+  const topActions = options.list ? `
+    <div class="wish-card-actions">
+      <button class="wish-mini-icon danger" type="button" onclick="removeWish('${wish.id}')" title="删除">×</button>
+    </div>` : '';
+  return `
+    <article class="wish-card ${options.result ? 'result' : ''}">
+      <div class="wish-card-top">
+        <div class="wish-meta">
+          <span class="wish-badge ${escHtml(author)}">${escHtml(wish.author_name || actorName(author))}</span>
+          ${status}
+          ${origin}
+          ${pulled}
+          <span>${escHtml(timeText(wish.created_at))}</span>
+        </div>
+        ${topActions}
+      </div>
+      <div class="wish-content">${escHtml(wish.content || '')}</div>
+      ${options.result ? `
+        <div class="wish-actions-row">
+          <button class="wish-small-btn" type="button" onclick="closeOverlay('wishResultOverlay')">放回池中</button>
+          <button class="wish-small-btn primary" type="button" onclick="changeCurrentWish('fulfilled')">实现了</button>
+          <button class="wish-small-btn danger" type="button" onclick="changeCurrentWish('released')">放下</button>
+        </div>` : ''}
+    </article>
+  `;
+}
+
+function renderWishResult(wish) {
+  const body = document.getElementById('wishResultBody');
+  const implementBtn = document.getElementById('wishResultImplementBtn');
+  const completeBtn = document.getElementById('wishResultCompleteBtn');
+  state.currentWish = wish || null;
+  setImplementChoices(false);
+  if (implementBtn) implementBtn.disabled = !wish;
+  if (completeBtn) completeBtn.hidden = !wish;
+  if (!body) return;
+  if (!wish) {
+    body.innerHTML = '<div class="wish-scene-empty">池水很安静<span>还没有可以捞起的别人的愿望</span></div>';
+    return;
+  }
+  const author = wish.author || 'user';
+  const authorName = wish.author_name || actorName(author);
+  body.innerHTML = `
+    <div class="wish-result-meta">
+      <span>愿望来自【<b>${escHtml(authorName)}</b>】</span>
+    </div>
+    <div class="wish-result-text">${escHtml(wish.content || '')}</div>
+  `;
+}
+
+function setImplementChoices(open) {
+  const sheet = document.getElementById('wishImplementSheet');
+  if (!sheet) return;
+  sheet.classList.toggle('show', !!open);
+}
+
+function toggleImplementChoices() {
+  if (!state.currentWish) return;
+  const sheet = document.getElementById('wishImplementSheet');
+  setImplementChoices(!sheet?.classList.contains('show'));
+}
+
+async function drawOneWish() {
+  const btn = document.getElementById('drawWishBtn');
+  const focus = document.getElementById('wishPoolFocus');
+  btn.disabled = true;
+  focus.classList.remove('rippling');
+  void focus.offsetWidth;
+  focus.classList.add('rippling');
+  try {
+    const data = await api('POST', '/api/wishes/draw?drawer=user');
+    renderWishResult(data.wish);
+    showOverlay('wishResultOverlay');
+    if (!data.wish) return;
+    await loadWishes();
+  } catch (e) {
+    showToast('捞取失败');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function openBook() {
+  showOverlay('wishBookOverlay');
+  loadWishes().catch(() => showToast('愿望册读取失败'));
+}
+
+function setBookFilter(filter) {
+  state.bookFilter = filter;
+  document.querySelectorAll('.wish-filter').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.filter === filter);
+  });
+  renderBook();
+}
+
+function renderBook() {
+  const counts = state.counts || {};
+  const countBox = document.getElementById('wishCounts');
+  if (countBox) {
+    countBox.textContent = `全部 ${counts.all || 0} · 池中 ${counts.active || 0} · 已实现 ${counts.fulfilled || 0}`;
+  }
+  const list = document.getElementById('wishBookList');
+  if (!list) return;
+  const items = state.wishes.filter(item => state.bookFilter === 'all' || item.status === state.bookFilter);
+  if (!items.length) {
+    list.innerHTML = '<div class="wish-empty">还没有愿望</div>';
+    return;
+  }
+  list.innerHTML = items.map(wish => renderWishCard(wish, { list: true })).join('');
+}
+
+function parentConvId() {
+  try {
+    if (window.parent && window.parent !== window && typeof window.parent.getCurrentConversationId === 'function') {
+      return window.parent.getCurrentConversationId() || '';
+    }
+  } catch (e) {}
+  return '';
+}
+
+function openAnnouncementDestination(data, target) {
+  try {
+    if (window.parent && window.parent !== window) {
+      if (target === 'aion' && typeof window.parent.closeSubPage === 'function') {
+        window.parent.closeSubPage(false);
+        return;
+      }
+      if (data && data.url && typeof window.parent.openSubPage === 'function') {
+        window.parent.openSubPage(data.url);
+        return;
+      }
+    }
+  } catch (e) {}
+  if (data && data.url && data.url !== '/chat') {
+    window.location.href = data.url;
+  }
+}
+
+function announceTargetLabel(target) {
+  if (target === 'aion') return actorName('aion');
+  if (target === 'connor') return actorName('connor');
+  return '群里';
+}
+
+async function announceCurrentWish(target) {
+  if (!state.currentWish) return;
+  const buttons = Array.from(document.querySelectorAll('.wish-implement-option'));
+  buttons.forEach(btn => { btn.disabled = true; });
+  try {
+    const data = await api('POST', `/api/wishes/${encodeURIComponent(state.currentWish.id)}/announce`, {
+      target,
+      conv_id: parentConvId(),
+    });
+    if (!data || data.detail || data.error || data.ok === false) throw new Error(data?.detail || data?.error || 'announce failed');
+    showToast(`已告诉${announceTargetLabel(target)}`);
+    closeOverlay('wishResultOverlay');
+    await loadWishes();
+    setTimeout(() => openAnnouncementDestination(data, target), 180);
+  } catch (e) {
+    showToast('发送失败');
+  } finally {
+    buttons.forEach(btn => { btn.disabled = false; });
+  }
+}
+
+async function changeWishStatus(id, status) {
+  try {
+    await api('PATCH', `/api/wishes/${encodeURIComponent(id)}`, { status });
+    await loadWishes();
+    showToast(status === 'fulfilled' ? '愿望已实现' : status === 'released' ? '愿望已放下' : '愿望回到池中');
+  } catch (e) {
+    showToast('更新失败');
+  }
+}
+
+async function changeCurrentWish(status) {
+  if (!state.currentWish) return;
+  await changeWishStatus(state.currentWish.id, status);
+  closeOverlay('wishResultOverlay');
+}
+
+async function removeWish(id) {
+  if (!confirm('删除这个愿望吗？')) return;
+  try {
+    await api('DELETE', `/api/wishes/${encodeURIComponent(id)}`);
+    await loadWishes();
+    showToast('愿望已删除');
+  } catch (e) {
+    showToast('删除失败');
+  }
+}
+
+function handleWishWs(msg) {
+  if (!msg || !String(msg.type || '').startsWith('wish_')) return;
+  loadWishes().catch(() => {});
+}
+
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  ['wishResultOverlay', 'wishFormOverlay', 'wishBookOverlay'].forEach(closeOverlay);
+});
+
+document.getElementById('wishContent')?.addEventListener('input', updateWishCharCount);
+updateWishCharCount();
+loadActors().then(loadWishes).catch(() => showToast('许愿池醒不过来'));
+if (typeof connectCommonWS === 'function') connectCommonWS(handleWishWs);
+</script>
+</body>
+</html>

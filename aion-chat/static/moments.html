@@ -562,14 +562,9 @@ async function deleteMoment(id) {
 // ── 点赞/踩 ──
 async function toggleReact(momentId, type) {
   try {
-    await api('POST', `/api/moments/${momentId}/react`, { author: 'user', type });
-    // 重新拉取这条朋友圈的数据并局部更新
-    const res = await api('GET', `/api/moments?page=1&page_size=${totalItems || 100}`);
-    const updated = res.items.find(m => m.id === momentId);
-    if (updated) {
-      const idx = allMoments.findIndex(m => m.id === momentId);
-      if (idx >= 0) { allMoments[idx] = updated; renderList(); }
-    }
+    const result = await api('POST', `/api/moments/${momentId}/react`, { author: 'user', type });
+    if (result?.error) throw new Error(result.error);
+    applyUserReaction(momentId, type, result || {});
   } catch(e) { showToast('操作失败'); }
 }
 
@@ -583,6 +578,39 @@ let _commentPressTimer = null;
 function findComment(momentId, commentId) {
   const moment = allMoments.find(m => m.id === momentId);
   return moment && (moment.comments || []).find(c => c.id === commentId);
+}
+
+function upsertMomentComment(comment) {
+  const idx = allMoments.findIndex(m => m.id === comment.moment_id);
+  if (idx < 0) return false;
+  if (!allMoments[idx].comments) allMoments[idx].comments = [];
+  const comments = allMoments[idx].comments;
+  const existingIdx = comments.findIndex(c => c.id === comment.id);
+  if (existingIdx >= 0) {
+    comments[existingIdx] = comment;
+  } else {
+    comments.push(comment);
+  }
+  renderList();
+  return true;
+}
+
+function applyUserReaction(momentId, type, result) {
+  const idx = allMoments.findIndex(m => m.id === momentId);
+  if (idx < 0) return false;
+  if (!allMoments[idx].reactions) allMoments[idx].reactions = [];
+  allMoments[idx].reactions = allMoments[idx].reactions.filter(r => r.author !== 'user');
+  if (result.action !== 'removed') {
+    allMoments[idx].reactions.push({
+      id: result.id || `mr_local_${Date.now()}`,
+      moment_id: momentId,
+      author: 'user',
+      type,
+      created_at: Date.now() / 1000,
+    });
+  }
+  renderList();
+  return true;
 }
 
 function startCommentPress(event, momentId, commentId) {
@@ -679,13 +707,9 @@ async function submitComment() {
   const btn = document.getElementById('commentModalBtn');
   btn.disabled = true;
   try {
-    await api('POST', `/api/moments/${momentId}/comments`, payload);
-    const res = await api('GET', `/api/moments?page=1&page_size=${totalItems || 100}`);
-    const updated = res.items.find(m => m.id === momentId);
-    if (updated) {
-      const idx = allMoments.findIndex(m => m.id === momentId);
-      if (idx >= 0) { allMoments[idx] = updated; renderList(); }
-    }
+    const comment = await api('POST', `/api/moments/${momentId}/comments`, payload);
+    if (!comment?.id || comment.error) throw new Error(comment?.error || '评论失败');
+    if (!upsertMomentComment(comment)) loadMoments(currentPage);
     closeCommentModal();
   } catch(e) { showToast('评论失败'); }
   finally { btn.disabled = false; }
@@ -698,62 +722,43 @@ document.getElementById('publishInput').addEventListener('input', function() {
 });
 
 // ── WebSocket 实时推送 ──
-function hookWS() {
-  if (window._ws && window._ws.readyState === 1) {
-    const orig = window._ws.onmessage;
-    window._ws.onmessage = function(e) {
-      if (orig) orig.call(this, e);
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'moment_new' && msg.data) {
-          // 新朋友圈：检查是否已存在
-          if (!allMoments.find(m => m.id === msg.data.id)) {
-            allMoments.unshift(msg.data);
-            totalItems++;
-            renderList();
-          }
-        } else if (msg.type === 'moment_comment' && msg.data) {
-          // 新评论：更新对应朋友圈
-          const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
-          if (idx >= 0) {
-            if (!allMoments[idx].comments) allMoments[idx].comments = [];
-            if (!allMoments[idx].comments.find(c => c.id === msg.data.id)) {
-              allMoments[idx].comments.push(msg.data);
-              renderList();
-            }
-          }
-        } else if (msg.type === 'moment_reaction' && msg.data) {
-          const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
-          if (idx >= 0) {
-            if (!allMoments[idx].reactions) allMoments[idx].reactions = [];
-            // 移除旧的同 author 反应
-            allMoments[idx].reactions = allMoments[idx].reactions.filter(r => r.author !== msg.data.author);
-            allMoments[idx].reactions.push(msg.data);
-            renderList();
-          }
-        } else if (msg.type === 'moment_reaction_removed' && msg.data) {
-          const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
-          if (idx >= 0 && allMoments[idx].reactions) {
-            allMoments[idx].reactions = allMoments[idx].reactions.filter(r => r.author !== msg.data.author);
-            renderList();
-          }
-        } else if (msg.type === 'moment_comment_deleted' && msg.data) {
-          const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
-          if (idx >= 0 && allMoments[idx].comments) {
-            const deletedId = msg.data.comment_id;
-            allMoments[idx].comments = allMoments[idx].comments
-              .filter(c => c.id !== deletedId)
-              .map(c => c.reply_to_id === deletedId ? { ...c, reply_to_id: null } : c);
-            renderList();
-          }
-        }
-      } catch(err) {}
-    };
-  } else {
-    setTimeout(hookWS, 500);
+function handleMomentWsMessage(msg) {
+  if (msg.type === 'moment_new' && msg.data) {
+    // 新朋友圈：检查是否已存在
+    if (!allMoments.find(m => m.id === msg.data.id)) {
+      allMoments.unshift(msg.data);
+      totalItems++;
+      renderList();
+    }
+  } else if (msg.type === 'moment_comment' && msg.data) {
+    upsertMomentComment(msg.data);
+  } else if (msg.type === 'moment_reaction' && msg.data) {
+    const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
+    if (idx >= 0) {
+      if (!allMoments[idx].reactions) allMoments[idx].reactions = [];
+      // 移除旧的同 author 反应
+      allMoments[idx].reactions = allMoments[idx].reactions.filter(r => r.author !== msg.data.author);
+      allMoments[idx].reactions.push(msg.data);
+      renderList();
+    }
+  } else if (msg.type === 'moment_reaction_removed' && msg.data) {
+    const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
+    if (idx >= 0 && allMoments[idx].reactions) {
+      allMoments[idx].reactions = allMoments[idx].reactions.filter(r => r.author !== msg.data.author);
+      renderList();
+    }
+  } else if (msg.type === 'moment_comment_deleted' && msg.data) {
+    const idx = allMoments.findIndex(m => m.id === msg.data.moment_id);
+    if (idx >= 0 && allMoments[idx].comments) {
+      const deletedId = msg.data.comment_id;
+      allMoments[idx].comments = allMoments[idx].comments
+        .filter(c => c.id !== deletedId)
+        .map(c => c.reply_to_id === deletedId ? { ...c, reply_to_id: null } : c);
+      renderList();
+    }
   }
 }
-if (typeof connectWS === 'function') hookWS();
+if (typeof connectCommonWS === 'function') connectCommonWS(handleMomentWsMessage);
 
 init();
 </script>

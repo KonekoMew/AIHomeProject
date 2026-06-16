@@ -22,7 +22,7 @@ logging.getLogger("uvicorn.access").addFilter(_QuietCamFilter())
 logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 from fastapi.responses import FileResponse, HTMLResponse
 
-from config import BASE_DIR, PUBLIC_DIR, UPLOADS_DIR, CODEX_UPLOADS_DIR, SCREENSHOTS_DIR, load_cam_config
+from config import BASE_DIR, PUBLIC_DIR, UPLOADS_DIR, SONGS_DIR, CODEX_UPLOADS_DIR, SCREENSHOTS_DIR, load_cam_config
 from database import init_db, get_db
 from ws import manager
 from camera import cam
@@ -55,6 +55,7 @@ from routes import phone_screen as phone_screen_routes
 from routes import search as search_routes
 from routes import autonomy as autonomy_routes
 from routes import persona_evolution as persona_evolution_routes
+from routes import wishes as wishes_routes
 from activity import pc_tracker, pc_display_tracker
 from memory import auto_digest
 from chatroom import _connor_1v1_auto_digest_loop
@@ -181,6 +182,7 @@ app.add_middleware(NoCacheStaticMiddleware)
 # 静态文件
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+app.mount("/songs", StaticFiles(directory=str(SONGS_DIR)), name="songs")
 app.mount("/cr-uploads", StaticFiles(directory=str(CODEX_UPLOADS_DIR)), name="cr-uploads")
 app.mount("/public", StaticFiles(directory=str(PUBLIC_DIR)), name="public")
 app.mount("/screenshots", StaticFiles(directory=str(SCREENSHOTS_DIR)), name="screenshots")
@@ -217,6 +219,7 @@ app.include_router(phone_screen_routes.router)
 app.include_router(search_routes.router)
 app.include_router(autonomy_routes.router)
 app.include_router(persona_evolution_routes.router)
+app.include_router(wishes_routes.router)
 
 
 # 页面
@@ -312,6 +315,10 @@ async def doudizhu_page():
 async def seeky_page():
     return FileResponse(BASE_DIR / "static" / "seeky.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
+@app.get("/wishes")
+async def wishes_page():
+    return FileResponse(BASE_DIR / "static" / "wishes.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
 @app.get("/health")
 async def health_page():
     return FileResponse(BASE_DIR / "static" / "health.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
@@ -341,7 +348,17 @@ async def websocket_endpoint(ws: WebSocket):
                 if msg.get("type") == "ping":
                     await ws.send_text(json.dumps({"type": "pong"}))
                 elif msg.get("type") == "tts_state":
-                    manager.set_tts_state(ws, msg.get("enabled", False), msg.get("voice", ""))
+                    try:
+                        active_at = float(msg.get("active_at")) if msg.get("active_at") is not None else None
+                    except (TypeError, ValueError):
+                        active_at = None
+                    manager.set_tts_state(
+                        ws,
+                        msg.get("enabled", False),
+                        msg.get("voice", ""),
+                        can_play=msg.get("can_play", True),
+                        active_at=active_at,
+                    )
                 elif msg.get("type") == "register_client":
                     manager.register_client_id(ws, msg.get("client_id", ""))
                 elif msg.get("type") == "pet_state":

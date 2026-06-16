@@ -19,6 +19,50 @@ let chatroomDailyCompressReview = null;
 let crMsgDebugData = {};
 let crSystemLogs = [];
 let crSysLogHasUnreadError = false;
+const CR_AMBIENT_LOCAL_ARMED_KEY = 'aion_chatroom_ambient_local_armed';
+function crMakeAmbientClientId() {
+  try {
+    if (crypto?.randomUUID) return `ambient_${crypto.randomUUID()}`;
+  } catch(e) {}
+  return `ambient_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+const crAmbientClientId = crMakeAmbientClientId();
+let crAmbientVoiceEnabled = false;
+let crAmbientLocalArmed = localStorage.getItem(CR_AMBIENT_LOCAL_ARMED_KEY) === '1';
+let crAmbientOwned = false;
+let crAmbientOwner = null;
+let crAmbientClaimInFlight = false;
+let crAmbientHeartbeatTimer = null;
+let crAmbientWakeWord = '现在立刻唤醒';
+let crAmbientStopWord = '结束立刻唤醒';
+let crAmbientMinChars = 500;
+let crAmbientIntervalSec = 120;
+let crAmbientCooldownSec = 180;
+let crAmbientStream = null;
+let crAmbientAudioCtx = null;
+let crAmbientAnalyser = null;
+let crAmbientUseNative = false;
+let crAmbientNativeChunks = [];
+let crAmbientNativeRecording = false;
+let crAmbientNativeSegmentChunks = [];
+let crAmbientVadTimer = null;
+let crAmbientMediaRecorder = null;
+let crAmbientChunks = [];
+let crAmbientRecording = false;
+let crAmbientSegmentStartedAt = 0;
+let crAmbientSilenceStartedAt = 0;
+let crAmbientSpeechFrames = 0;
+let crAmbientNoiseFloor = 0.008;
+let crAmbientTranscriptBuffer = [];
+let crAmbientBufferExpanded = false;
+let crAmbientLastCheckAt = 0;
+let crAmbientWakePendingUntil = 0;
+let crAmbientEvaluating = false;
+let crAmbientDiscardSegment = false;
+let crAmbientPausedForTts = false;
+let crAmbientTtsResumeTimer = null;
+let crAmbientLastUserToggleAt = 0;
+let crAmbientResumeRetryTimer = null;
 
 function applyChatroomTheme(theme) {
   const next = theme === 'light' ? 'light' : 'dark';
@@ -94,6 +138,9 @@ let crTtsAionVoice = '';
 let crTtsConnorVoice = '';
 const crSeenTTSChunks = new Set();
 const crSeenTTSDone = new Set();
+let crWs = null;
+let crTtsAcceptAfter = Date.now() / 1000;
+const crSuppressedTTSMsgIds = new Set();
 const crIsEmbedded = (() => {
   try { return window.parent && window.parent !== window; }
   catch(e) { return false; }
@@ -158,11 +205,16 @@ const _ttsEngine = (function() {
             if (q.nextPlay > maxSeq) { eng.playOrder.shift(); delete eng.chunkQueues[msgId]; continue; }
             url = q.chunks[q.nextPlay];
           }
-          if (url === undefined) { eng.playing = false; return; }
+          if (url === undefined) {
+            eng.playing = false;
+            crAmbientResumeAfterTts();
+            return;
+          }
         }
         eng.playing = true;
         _stopRequested = false;
         clearResumeTimer();
+        crAmbientPauseForTts();
         const myId = ++_cbId;
         const advance = () => {
           if (myId !== _cbId) return; // 过时回调，忽略
@@ -187,6 +239,7 @@ const _ttsEngine = (function() {
         return;
       }
       eng.playing = false;
+      crAmbientResumeAfterTts();
     },
     enqueue(msgId, seq, url) {
       if (!eng.chunkQueues[msgId]) {
@@ -215,6 +268,7 @@ const _ttsEngine = (function() {
       clearResumeTimer();
       eng.audio.pause(); eng.audio.src = '';
       eng.chunkQueues = {}; eng.playOrder = []; eng.playing = false;
+      crAmbientResumeAfterTts(500);
     }
   };
 
@@ -234,6 +288,77 @@ const _ttsEngine = (function() {
   return eng;
 })();
 let crTtsAudio = _ttsEngine.audio;
+
+function crTtsPlaybackAllowed() {
+  return !crIsEmbedded && document.visibilityState !== 'hidden';
+}
+
+function crCurrentTTSVoice() {
+  return crTtsAionVoice || crTtsConnorVoice || '';
+}
+
+function crSendTTSState() {
+  if (!crWs || crWs.readyState !== WebSocket.OPEN) return;
+  crWs.send(JSON.stringify({
+    type: 'tts_state',
+    enabled: crTtsEnabled,
+    voice: crCurrentTTSVoice(),
+    can_play: crTtsPlaybackAllowed(),
+    active_at: Date.now() / 1000,
+    client_id: crAmbientClientId
+  }));
+}
+
+function crRefreshTTSPlaybackState() {
+  crTtsAcceptAfter = Date.now() / 1000;
+  if (!crTtsPlaybackAllowed()) crStopTTS();
+  crSendTTSState();
+}
+
+function crSuspendTTSPlaybackState() {
+  crTtsAcceptAfter = Date.now() / 1000;
+  crStopTTS();
+  crSendTTSState();
+}
+
+let crTtsPlaybackStateLastSent = 0;
+function crBumpTTSPlaybackState() {
+  const now = Date.now();
+  if (now - crTtsPlaybackStateLastSent < 1000) return;
+  crTtsPlaybackStateLastSent = now;
+  crSendTTSState();
+}
+
+function crSuppressTTSMsg(msgId) {
+  if (msgId) crSuppressedTTSMsgIds.add(msgId);
+}
+
+function crShouldAcceptTTSMsg(msgId, createdAt, targetClientId) {
+  if (!msgId || crSuppressedTTSMsgIds.has(msgId)) return false;
+  if (targetClientId && targetClientId !== crAmbientClientId) return false;
+  if (!crTtsPlaybackAllowed()) {
+    crSuppressTTSMsg(msgId);
+    crStopTTS();
+    return false;
+  }
+  const ts = Number(createdAt || 0);
+  if (ts && ts < crTtsAcceptAfter) {
+    crSuppressTTSMsg(msgId);
+    return false;
+  }
+  return true;
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (crTtsPlaybackAllowed()) crRefreshTTSPlaybackState();
+  else crSuspendTTSPlaybackState();
+});
+window.addEventListener('pagehide', crSuspendTTSPlaybackState);
+window.addEventListener('pageshow', crRefreshTTSPlaybackState);
+document.addEventListener('freeze', crSuspendTTSPlaybackState);
+window.addEventListener('focus', crBumpTTSPlaybackState);
+document.addEventListener('pointerdown', crBumpTTSPlaybackState, { passive: true });
+document.addEventListener('keydown', crBumpTTSPlaybackState);
 
 // ── 音乐卡片 ──
 let crMusicCards = {}; // { msgId: [{ id, name, artist, cover, audio_url }] }
@@ -404,12 +529,13 @@ function crPlayMusicOnline(songId) {
   audio.play().catch(() => {});
 }
 
-function crEnqueueTTSChunk(msgId, seq, url) {
+function crEnqueueTTSChunk(msgId, seq, url, createdAt, targetClientId) {
   if (!crTtsEnabled) return;
   const key = `${msgId}:${seq}`;
   if (crSeenTTSChunks.has(key)) return;
   crSeenTTSChunks.add(key);
   if (crIsEmbedded) return;
+  if (!crShouldAcceptTTSMsg(msgId, createdAt, targetClientId)) return;
   _ttsEngine.enqueue(msgId, seq, url);
 }
 
@@ -417,7 +543,13 @@ async function crPlayNextTTSChunk() {
   if (!_ttsEngine.playing) _ttsEngine._next();
 }
 
-function crFinishTTSForMsg(msgId) {
+function crFinishTTSForMsg(msgId, createdAt, targetClientId) {
+  if (targetClientId && targetClientId !== crAmbientClientId) return;
+  const ts = Number(createdAt || 0);
+  if (crSuppressedTTSMsgIds.has(msgId) || (ts && ts < crTtsAcceptAfter)) {
+    crSuppressedTTSMsgIds.delete(msgId);
+    return;
+  }
   if (crSeenTTSDone.has(msgId)) return;
   crSeenTTSDone.add(msgId);
   if (crIsEmbedded) return;
@@ -438,7 +570,9 @@ async function crReplayTTS(msgId) {
   // 正在播放则停止
   if (btn && btn.classList.contains('playing')) {
     crReplayAudio.pause(); crReplayAudio.src = ''; crReplayChunks = [];
-    btn.classList.remove('playing'); return;
+    btn.classList.remove('playing');
+    crAmbientResumeAfterTts(500);
+    return;
   }
   crReplayAudio.pause(); crReplayChunks = [];
   document.querySelectorAll('.tts-replay-btn.playing').forEach(b => b.classList.remove('playing'));
@@ -466,31 +600,35 @@ async function crReplayTTS(msgId) {
     const url = URL.createObjectURL(blob);
     crReplayAudio.src = url;
     if (btn) btn.classList.add('playing');
-    crReplayAudio.onended = () => { URL.revokeObjectURL(url); if (btn) btn.classList.remove('playing'); };
-    crReplayAudio.onerror = () => { URL.revokeObjectURL(url); if (btn) btn.classList.remove('playing'); };
-    await crReplayAudio.play().catch(() => { if (btn) btn.classList.remove('playing'); });
+    crAmbientPauseForTts();
+    crReplayAudio.onended = () => { URL.revokeObjectURL(url); if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(); };
+    crReplayAudio.onerror = () => { URL.revokeObjectURL(url); if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(); };
+    await crReplayAudio.play().catch(() => { if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(500); });
     return;
   }
 
   // 顺序播放分段
   crReplayChunks = chunks; crReplayIdx = 0;
   if (btn) btn.classList.add('playing');
+  crAmbientPauseForTts();
   _crPlayReplayChunk(btn);
 }
 
 function _crPlayReplayChunk(btn) {
-  if (crReplayIdx >= crReplayChunks.length) { if (btn) btn.classList.remove('playing'); return; }
+  if (crReplayIdx >= crReplayChunks.length) { if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(); return; }
   crReplayAudio.src = crReplayChunks[crReplayIdx];
   crReplayAudio.onended = () => { crReplayIdx++; _crPlayReplayChunk(btn); };
   crReplayAudio.onerror = () => { crReplayIdx++; _crPlayReplayChunk(btn); };
-  crReplayAudio.play().catch(() => { if (btn) btn.classList.remove('playing'); });
+  crReplayAudio.play().catch(() => { if (btn) btn.classList.remove('playing'); crAmbientResumeAfterTts(500); });
 }
 
 function onTtsToggleChange() {
   crTtsEnabled = document.getElementById('setTtsEnabled').checked;
+  crTtsAcceptAfter = Date.now() / 1000;
   if (!crTtsEnabled) crStopTTS();
   // 持久化到服务端，所有窗口共享
   api('/config', { method: 'PUT', body: JSON.stringify({ tts_enabled: crTtsEnabled }) }).catch(() => {});
+  crSendTTSState();
 }
 
 function onWhisperToggleChange() {
@@ -604,6 +742,776 @@ async function api(path, opts = {}) {
   return resp.json();
 }
 
+function crAmbientSetLocalArmed(armed) {
+  crAmbientLocalArmed = !!armed;
+  localStorage.setItem(CR_AMBIENT_LOCAL_ARMED_KEY, crAmbientLocalArmed ? '1' : '0');
+  crAmbientUpdateToggleView();
+}
+
+function crAmbientUpdateToggleView() {
+  const enabledEl = document.getElementById('setAmbientVoiceEnabled');
+  if (enabledEl) enabledEl.checked = !!(crAmbientVoiceEnabled && crAmbientLocalArmed);
+}
+
+function crAmbientNativeBridge() {
+  try {
+    if (typeof _getNativeBridge === 'function') return _getNativeBridge('AionAudio');
+  } catch(e) {}
+  return null;
+}
+
+function crAmbientIsMobileLike() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+}
+
+function crAmbientSourceInfo() {
+  if (crAmbientNativeBridge()) return { source: 'android_native', label: '手机麦克风' };
+  if (crAmbientIsMobileLike()) return { source: 'phone_browser', label: '手机麦克风' };
+  return { source: 'desktop_browser', label: '电脑麦克风' };
+}
+
+function crAmbientOwnerLabel(listener = crAmbientOwner) {
+  if (!listener || !listener.active) return '';
+  return listener.label || (listener.source && listener.source.includes('phone') ? '手机麦克风' : '电脑麦克风');
+}
+
+function crAmbientDesired() {
+  return crAmbientVoiceEnabled && crAmbientLocalArmed && currentRoom && currentRoom.type === 'group';
+}
+
+function crAmbientIsCapturing() {
+  return !!crAmbientStream || !!crAmbientUseNative;
+}
+
+function crAmbientApplyListenerState(listener) {
+  crAmbientOwner = listener || null;
+  const active = !!listener?.active;
+  const owned = active && listener.client_id === crAmbientClientId;
+  crAmbientOwned = owned;
+  if (active && !owned) {
+    const wasArmed = crAmbientLocalArmed || crAmbientIsCapturing();
+    crAmbientSetLocalArmed(false);
+    crAmbientStopHeartbeat();
+    crAmbientStop(false);
+    crAmbientSetStatus(`${crAmbientOwnerLabel(listener)}侦听中`, 'warn');
+    crAmbientUpdateToggleView();
+    if (wasArmed) toast(`${crAmbientOwnerLabel(listener)}已接管环境侦听`);
+    return;
+  }
+  if (!active) {
+    crAmbientOwned = false;
+    if (crAmbientVoiceEnabled && crAmbientLocalArmed && currentRoom?.type === 'group') {
+      crAmbientSyncRunning();
+    } else if (crAmbientVoiceEnabled && !crAmbientLocalArmed) {
+      crAmbientSetStatus('本端未开启', 'warn');
+    }
+    crAmbientUpdateToggleView();
+  }
+}
+
+async function crAmbientClaim(takeover = false) {
+  if (!crAmbientDesired() || crAmbientClaimInFlight) return false;
+  crAmbientClaimInFlight = true;
+  const src = crAmbientSourceInfo();
+  try {
+    const resp = await fetch(`${API}/ambient-voice/claim`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: crAmbientClientId,
+        room_id: currentRoom?.id || '',
+        source: src.source,
+        label: src.label,
+        takeover,
+      }),
+    });
+    const result = await resp.json();
+    if (result.claimed) {
+      crAmbientOwner = result.listener;
+      crAmbientOwned = true;
+      crAmbientStartHeartbeat();
+      crAmbientUpdateToggleView();
+      return true;
+    }
+    crAmbientOwned = false;
+    crAmbientOwner = result.listener || null;
+    crAmbientStopHeartbeat();
+    crAmbientStop(false);
+    if (result.reason === 'occupied' && crAmbientOwner?.active) {
+      crAmbientSetLocalArmed(false);
+      crAmbientSetStatus(`${crAmbientOwnerLabel(crAmbientOwner)}侦听中`, 'warn');
+    } else if (result.reason === 'disabled') {
+      crAmbientSetLocalArmed(false);
+      crAmbientSetStatus('关闭', '');
+    } else {
+      crAmbientSetStatus('待启动', 'warn');
+    }
+    crAmbientUpdateToggleView();
+  } catch (e) {
+    console.warn('[AmbientVoice] claim failed:', e);
+    crAmbientOwned = false;
+    crAmbientSetStatus('认领失败', 'err');
+    crAmbientUpdateToggleView();
+  } finally {
+    crAmbientClaimInFlight = false;
+  }
+  return false;
+}
+
+function crAmbientStartHeartbeat() {
+  if (crAmbientHeartbeatTimer) return;
+  crAmbientHeartbeatTimer = setInterval(() => {
+    if (crAmbientDesired()) crAmbientClaim(false);
+    else crAmbientStopHeartbeat();
+  }, 7000);
+}
+
+function crAmbientStopHeartbeat() {
+  if (!crAmbientHeartbeatTimer) return;
+  clearInterval(crAmbientHeartbeatTimer);
+  crAmbientHeartbeatTimer = null;
+}
+
+async function crAmbientRelease() {
+  crAmbientStopHeartbeat();
+  const owned = crAmbientOwned;
+  crAmbientOwned = false;
+  crAmbientOwner = null;
+  crAmbientUpdateToggleView();
+  if (!owned) return;
+  try {
+    await fetch(`${API}/ambient-voice/release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: crAmbientClientId }),
+    });
+  } catch (e) {
+    console.warn('[AmbientVoice] release failed:', e);
+  }
+}
+
+async function crAmbientRefreshListenerState() {
+  try {
+    const resp = await fetch(`${API}/ambient-voice/listener`);
+    const result = await resp.json();
+    if (result.listener) crAmbientApplyListenerState(result.listener);
+  } catch (e) {
+    console.warn('[AmbientVoice] listener state failed:', e);
+  }
+}
+
+function crAmbientPauseForTts() {
+  if (crAmbientTtsResumeTimer) {
+    clearTimeout(crAmbientTtsResumeTimer);
+    crAmbientTtsResumeTimer = null;
+  }
+  if (crAmbientResumeRetryTimer) {
+    clearTimeout(crAmbientResumeRetryTimer);
+    crAmbientResumeRetryTimer = null;
+  }
+  if (!crAmbientDesired() || !crAmbientOwned) return;
+  crAmbientPausedForTts = true;
+  crAmbientStop(false);
+  crAmbientTranscriptBuffer = [];
+  crAmbientWakePendingUntil = 0;
+  crAmbientUpdateBufferView();
+  crAmbientSetStatus('TTS播放中', 'warn');
+}
+
+function crAmbientScheduleResumeRetry(attempt = 1) {
+  if (crAmbientResumeRetryTimer) clearTimeout(crAmbientResumeRetryTimer);
+  if (attempt > 4) {
+    if (crAmbientDesired() && crAmbientOwned && !crAmbientIsCapturing()) crAmbientSetStatus('待启动', 'warn');
+    return;
+  }
+  crAmbientResumeRetryTimer = setTimeout(async () => {
+    crAmbientResumeRetryTimer = null;
+    if (crAmbientPausedForTts || _ttsEngine?.playing) return;
+    if (!crAmbientDesired() || !crAmbientOwned || crAmbientIsCapturing()) return;
+    crAmbientSetStatus('恢复侦听中', 'warn');
+    await crAmbientSyncRunning({ resumeAfterTts: true });
+    if (crAmbientDesired() && crAmbientOwned && !crAmbientIsCapturing()) {
+      crAmbientScheduleResumeRetry(attempt + 1);
+    }
+  }, attempt === 1 ? 450 : 900);
+}
+
+function crAmbientResumeAfterTts(delayMs = 1200) {
+  if (!crAmbientPausedForTts) return;
+  if (_ttsEngine?.playing) return;
+  if (typeof crReplayAudio !== 'undefined' && crReplayAudio && !crReplayAudio.paused && !crReplayAudio.ended) return;
+  if (crAmbientTtsResumeTimer) clearTimeout(crAmbientTtsResumeTimer);
+  crAmbientTtsResumeTimer = setTimeout(async () => {
+    crAmbientTtsResumeTimer = null;
+    if (!crAmbientPausedForTts) return;
+    crAmbientPausedForTts = false;
+    if (crAmbientDesired() && crAmbientOwned) {
+      crAmbientSetStatus('恢复侦听中', 'warn');
+      await crAmbientSyncRunning({ resumeAfterTts: true });
+      if (!crAmbientIsCapturing()) crAmbientScheduleResumeRetry();
+    }
+  }, delayMs);
+}
+
+function crAmbientSetStatus(text, cls = '') {
+  const el = document.getElementById('crAmbientVoiceStatus');
+  if (!el) return;
+  el.textContent = text;
+  el.className = `ambient-voice-status ${cls}`.trim();
+}
+
+function crAmbientBufferText() {
+  return crAmbientTranscriptBuffer.join('\n').trim();
+}
+
+function crAmbientUpdateBufferView() {
+  const metaEl = document.getElementById('crAmbientBufferMeta');
+  const previewEl = document.getElementById('crAmbientBufferPreview');
+  const toggleEl = document.getElementById('crAmbientBufferToggle');
+  const text = crAmbientBufferText();
+  const chars = crAmbientTranscriptBuffer.join('').length;
+  const count = crAmbientTranscriptBuffer.length;
+  if (metaEl) metaEl.textContent = `${chars} 字 / ${count} 段`;
+  if (toggleEl) toggleEl.textContent = crAmbientBufferExpanded ? '收起' : '查看';
+  if (!previewEl) return;
+  previewEl.classList.toggle('show', crAmbientBufferExpanded);
+  previewEl.classList.toggle('empty', !text);
+  previewEl.textContent = text || '暂无待检查片段';
+}
+
+function crToggleAmbientBufferView() {
+  crAmbientBufferExpanded = !crAmbientBufferExpanded;
+  crAmbientUpdateBufferView();
+}
+
+function crClearAmbientBuffer() {
+  crAmbientTranscriptBuffer = [];
+  crAmbientWakePendingUntil = 0;
+  crAmbientUpdateBufferView();
+  if (crAmbientCanRun()) crAmbientSetStatus('侦听中', 'on');
+  toast('待检查片段已清空');
+}
+
+function crAmbientReadInputs(options = {}) {
+  const wakeWord = (document.getElementById('setAmbientWakeWord')?.value || crAmbientWakeWord || '').trim();
+  const stopWord = (document.getElementById('setAmbientStopWord')?.value || crAmbientStopWord || '').trim();
+  const minChars = parseInt(document.getElementById('setAmbientMinChars')?.value || crAmbientMinChars, 10);
+  const intervalSec = parseInt(document.getElementById('setAmbientIntervalSec')?.value || crAmbientIntervalSec, 10);
+  const enabled = options.enabledOverride !== undefined ? !!options.enabledOverride : !!crAmbientVoiceEnabled;
+  return {
+    ambient_voice_enabled: enabled,
+    ambient_voice_wake_word: wakeWord || '现在立刻唤醒',
+    ambient_voice_stop_word: stopWord || '结束立刻唤醒',
+    ambient_voice_min_chars: Math.max(80, Math.min(2000, Number.isFinite(minChars) ? minChars : 500)),
+    ambient_voice_interval_seconds: Math.max(20, Math.min(600, Number.isFinite(intervalSec) ? intervalSec : 120)),
+    ambient_voice_cooldown_seconds: crAmbientCooldownSec || 180,
+  };
+}
+
+function crApplyAmbientVoiceConfig(cfg = {}) {
+  crAmbientVoiceEnabled = !!cfg.ambient_voice_enabled;
+  crAmbientWakeWord = (cfg.ambient_voice_wake_word || '现在立刻唤醒').trim() || '现在立刻唤醒';
+  crAmbientStopWord = (cfg.ambient_voice_stop_word || '结束立刻唤醒').trim() || '结束立刻唤醒';
+  crAmbientMinChars = Math.max(80, Math.min(2000, parseInt(cfg.ambient_voice_min_chars || 500, 10)));
+  crAmbientIntervalSec = Math.max(20, Math.min(600, parseInt(cfg.ambient_voice_interval_seconds || 120, 10)));
+  crAmbientCooldownSec = Math.max(30, Math.min(1800, parseInt(cfg.ambient_voice_cooldown_seconds || 180, 10)));
+  const enabledEl = document.getElementById('setAmbientVoiceEnabled');
+  const wakeEl = document.getElementById('setAmbientWakeWord');
+  const stopEl = document.getElementById('setAmbientStopWord');
+  const minEl = document.getElementById('setAmbientMinChars');
+  const intervalEl = document.getElementById('setAmbientIntervalSec');
+  crAmbientUpdateToggleView();
+  if (wakeEl) wakeEl.value = crAmbientWakeWord;
+  if (stopEl) stopEl.value = crAmbientStopWord;
+  if (minEl) minEl.value = crAmbientMinChars;
+  if (intervalEl) intervalEl.value = crAmbientIntervalSec;
+  crAmbientSetStatus(
+    crAmbientVoiceEnabled ? (crAmbientLocalArmed ? (crAmbientIsCapturing() ? '侦听中' : '待启动') : '本端未开启') : '关闭',
+    crAmbientVoiceEnabled ? (crAmbientLocalArmed ? 'warn' : 'warn') : ''
+  );
+  crAmbientUpdateBufferView();
+}
+
+async function crSaveAmbientVoiceSettings(options = {}) {
+  const next = crAmbientReadInputs(options);
+  crAmbientVoiceEnabled = next.ambient_voice_enabled;
+  crAmbientWakeWord = next.ambient_voice_wake_word;
+  crAmbientStopWord = next.ambient_voice_stop_word;
+  crAmbientMinChars = next.ambient_voice_min_chars;
+  crAmbientIntervalSec = next.ambient_voice_interval_seconds;
+  crAmbientCooldownSec = next.ambient_voice_cooldown_seconds;
+  await api('/config', { method: 'PUT', body: JSON.stringify(next) });
+  if (!options.silent) toast('环境侦听设置已保存');
+  if (options.sync !== false) crAmbientSyncRunning();
+}
+
+async function crOnAmbientVoiceToggle() {
+  const enabled = !!document.getElementById('setAmbientVoiceEnabled')?.checked;
+  crAmbientLastUserToggleAt = Date.now();
+  crAmbientSetLocalArmed(enabled);
+  try {
+    await crSaveAmbientVoiceSettings({ silent: true, sync: false, enabledOverride: enabled });
+    if (enabled) {
+      await crAmbientSyncRunning({ takeover: true });
+      crAmbientUpdateToggleView();
+      toast(crAmbientOwned ? `${crAmbientSourceInfo().label}环境侦听已开启` : '环境侦听等待接管');
+    } else {
+      await crAmbientRelease();
+      crAmbientStop(true);
+      crAmbientUpdateToggleView();
+      toast('环境侦听已关闭');
+    }
+  } catch (e) {
+    crAmbientUpdateToggleView();
+    toast('环境侦听保存失败');
+  }
+}
+
+function crAmbientCanRun() {
+  return crAmbientDesired() && crAmbientOwned;
+}
+
+async function crAmbientSyncRunning(options = {}) {
+  if (!crAmbientVoiceEnabled) {
+    crAmbientPausedForTts = false;
+    if (crAmbientResumeRetryTimer) { clearTimeout(crAmbientResumeRetryTimer); crAmbientResumeRetryTimer = null; }
+    await crAmbientRelease();
+    crAmbientStop(true);
+    crAmbientUpdateToggleView();
+    return;
+  }
+  if (!crAmbientLocalArmed) {
+    crAmbientPausedForTts = false;
+    if (crAmbientResumeRetryTimer) { clearTimeout(crAmbientResumeRetryTimer); crAmbientResumeRetryTimer = null; }
+    await crAmbientRelease();
+    crAmbientStop(false);
+    crAmbientSetStatus('本端未开启', 'warn');
+    crAmbientUpdateToggleView();
+    return;
+  }
+  if (!currentRoom || currentRoom.type !== 'group') {
+    await crAmbientRelease();
+    crAmbientStop(false);
+    crAmbientSetStatus('切到群聊后生效', 'warn');
+    crAmbientUpdateToggleView();
+    return;
+  }
+  if (crAmbientPausedForTts || _ttsEngine?.playing) {
+    crAmbientSetStatus('TTS播放中', 'warn');
+    return;
+  }
+  if (!crAmbientOwned) {
+    const claimed = await crAmbientClaim(!!options.takeover);
+    if (!claimed) return;
+  }
+  if (!crAmbientIsCapturing()) await crAmbientStart();
+}
+
+async function crAmbientStart() {
+  if (crAmbientIsCapturing() || !crAmbientCanRun()) return;
+  const bridge = crAmbientNativeBridge();
+  if (bridge) {
+    if (crAmbientStartNative(bridge)) return;
+    console.warn('[AmbientVoice] native bridge start failed, falling back to getUserMedia');
+  }
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    crAmbientSetStatus('浏览器不支持', 'err');
+    return;
+  }
+  try {
+    crAmbientStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    crAmbientAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    await crAmbientAudioCtx.resume().catch(() => {});
+    const source = crAmbientAudioCtx.createMediaStreamSource(crAmbientStream);
+    crAmbientAnalyser = crAmbientAudioCtx.createAnalyser();
+    crAmbientAnalyser.fftSize = 1024;
+    source.connect(crAmbientAnalyser);
+    crAmbientNoiseFloor = 0.008;
+    crAmbientTranscriptBuffer = [];
+    crAmbientUpdateBufferView();
+    crAmbientSetStatus('侦听中', 'on');
+    crAmbientUpdateToggleView();
+    crAmbientMonitor();
+  } catch (e) {
+    console.warn('[AmbientVoice] start failed:', e);
+    crAmbientStop(false);
+    crAmbientSetStatus('麦克风失败', 'err');
+    toast('无法访问麦克风');
+  }
+}
+
+function crAmbientStartNative(bridge) {
+  crAmbientNativeChunks = [];
+  crAmbientNativeSegmentChunks = [];
+  crAmbientNativeRecording = false;
+  crAmbientUseNative = true;
+  crAmbientDiscardSegment = false;
+  window._ambientNativeOnChunk = (b64) => crAmbientOnNativeChunk(b64);
+  try { if (window.top !== window) window.top._ambientNativeOnChunk = window._ambientNativeOnChunk; } catch(e) {}
+  try { if (window.parent !== window) window.parent._ambientNativeOnChunk = window._ambientNativeOnChunk; } catch(e) {}
+  const ok = bridge.start();
+  if (!ok) {
+    crAmbientUseNative = false;
+    window._ambientNativeOnChunk = null;
+    return false;
+  }
+  crAmbientNoiseFloor = 0.008;
+  crAmbientSpeechFrames = 0;
+  crAmbientTranscriptBuffer = [];
+  crAmbientUpdateBufferView();
+  crAmbientSetStatus('手机侦听中', 'on');
+  crAmbientUpdateToggleView();
+  return true;
+}
+
+function crAmbientNativeLevel(b64) {
+  try {
+    const bin = atob(b64);
+    if (!bin) return 0;
+    let sum = 0;
+    let count = 0;
+    for (let i = 0; i + 1 < bin.length; i += 2) {
+      let v = bin.charCodeAt(i) | (bin.charCodeAt(i + 1) << 8);
+      if (v & 0x8000) v -= 0x10000;
+      const n = v / 32768;
+      sum += n * n;
+      count++;
+    }
+    return count ? Math.sqrt(sum / count) : 0;
+  } catch(e) {
+    return 0;
+  }
+}
+
+function crAmbientOnNativeChunk(b64) {
+  if (!crAmbientUseNative || !crAmbientCanRun() || !b64) return;
+  const now = Date.now();
+  const level = crAmbientNativeLevel(b64);
+  if (!crAmbientNativeRecording) {
+    crAmbientNoiseFloor = crAmbientNoiseFloor * 0.96 + Math.min(level, 0.08) * 0.04;
+  }
+  const threshold = Math.max(0.018, crAmbientNoiseFloor * 3.0);
+  const isSpeech = level > threshold;
+  if (isSpeech) crAmbientSpeechFrames += 1;
+  else crAmbientSpeechFrames = 0;
+
+  if (!crAmbientNativeRecording && !crAmbientEvaluating && crAmbientSpeechFrames >= 3) {
+    crAmbientNativeRecording = true;
+    crAmbientNativeSegmentChunks = [];
+    crAmbientSegmentStartedAt = now;
+    crAmbientSilenceStartedAt = 0;
+    crAmbientSetStatus('听到人声', 'on');
+  }
+
+  if (!crAmbientNativeRecording) return;
+  crAmbientNativeSegmentChunks.push(b64);
+  if (isSpeech) {
+    crAmbientSilenceStartedAt = 0;
+  } else if (!crAmbientSilenceStartedAt) {
+    crAmbientSilenceStartedAt = now;
+  }
+
+  if ((crAmbientSilenceStartedAt && now - crAmbientSilenceStartedAt > 950)
+      || now - crAmbientSegmentStartedAt > 16000) {
+    crAmbientStopNativeSegment();
+  }
+}
+
+function crAmbientStopNativeSegment(updateStatus = true) {
+  if (!crAmbientNativeRecording) return;
+  const duration = (Date.now() - crAmbientSegmentStartedAt) / 1000;
+  const chunks = crAmbientNativeSegmentChunks.slice();
+  const discard = crAmbientDiscardSegment;
+  crAmbientNativeRecording = false;
+  crAmbientNativeSegmentChunks = [];
+  if (!discard && chunks.length) {
+    crAmbientHandleBlob(_crBuildWav(chunks), duration);
+  }
+  if (updateStatus) crAmbientSetStatus(crAmbientWakePendingUntil > Date.now() ? '即时侦听' : '侦听中', 'on');
+}
+
+function crAmbientStop(updateStatus = true) {
+  if (crAmbientVadTimer) {
+    clearTimeout(crAmbientVadTimer);
+    crAmbientVadTimer = null;
+  }
+  crAmbientDiscardSegment = true;
+  if (crAmbientNativeRecording) crAmbientStopNativeSegment(false);
+  if (crAmbientUseNative) {
+    const bridge = crAmbientNativeBridge();
+    if (bridge) try { bridge.stop(); } catch(e) {}
+    const nativeHandler = window._ambientNativeOnChunk;
+    crAmbientUseNative = false;
+    crAmbientNativeChunks = [];
+    crAmbientNativeSegmentChunks = [];
+    crAmbientNativeRecording = false;
+    window._ambientNativeOnChunk = null;
+    try { if (window.top !== window && window.top._ambientNativeOnChunk === nativeHandler) window.top._ambientNativeOnChunk = null; } catch(e) {}
+    try { if (window.parent !== window && window.parent._ambientNativeOnChunk === nativeHandler) window.parent._ambientNativeOnChunk = null; } catch(e) {}
+  }
+  if (crAmbientMediaRecorder && crAmbientMediaRecorder.state !== 'inactive') {
+    try { crAmbientMediaRecorder.stop(); } catch {}
+  }
+  crAmbientMediaRecorder = null;
+  crAmbientRecording = false;
+  crAmbientChunks = [];
+  crAmbientTranscriptBuffer = [];
+  crAmbientUpdateBufferView();
+  crAmbientWakePendingUntil = 0;
+  if (crAmbientStream) {
+    crAmbientStream.getTracks().forEach(t => t.stop());
+    crAmbientStream = null;
+  }
+  if (crAmbientAudioCtx) {
+    crAmbientAudioCtx.close().catch(() => {});
+    crAmbientAudioCtx = null;
+  }
+  crAmbientAnalyser = null;
+  if (updateStatus) {
+    if (!crAmbientVoiceEnabled) crAmbientSetStatus('关闭', '');
+    else if (!crAmbientLocalArmed) crAmbientSetStatus('本端未开启', 'warn');
+    else if (crAmbientOwner?.active && crAmbientOwner.client_id !== crAmbientClientId) crAmbientSetStatus(`${crAmbientOwnerLabel()}侦听中`, 'warn');
+    else crAmbientSetStatus('待启动', 'warn');
+  }
+  crAmbientUpdateToggleView();
+}
+
+function crAmbientLevel() {
+  if (!crAmbientAnalyser) return 0;
+  const data = new Uint8Array(crAmbientAnalyser.fftSize);
+  crAmbientAnalyser.getByteTimeDomainData(data);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) {
+    const v = (data[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.sqrt(sum / data.length);
+}
+
+function crAmbientMonitor() {
+  if (!crAmbientStream || !crAmbientAnalyser || !crAmbientCanRun()) return;
+  const now = Date.now();
+  const level = crAmbientLevel();
+  if (!crAmbientRecording) {
+    crAmbientNoiseFloor = crAmbientNoiseFloor * 0.96 + Math.min(level, 0.08) * 0.04;
+  }
+  const threshold = Math.max(0.018, crAmbientNoiseFloor * 3.0);
+  const isSpeech = level > threshold;
+  if (isSpeech) crAmbientSpeechFrames += 1;
+  else crAmbientSpeechFrames = 0;
+
+  if (!crAmbientRecording && crAmbientSpeechFrames >= 3) {
+    crAmbientStartSegment();
+  }
+  if (crAmbientRecording) {
+    if (isSpeech) {
+      crAmbientSilenceStartedAt = 0;
+    } else if (!crAmbientSilenceStartedAt) {
+      crAmbientSilenceStartedAt = now;
+    }
+    if ((crAmbientSilenceStartedAt && now - crAmbientSilenceStartedAt > 950)
+        || now - crAmbientSegmentStartedAt > 16000) {
+      crAmbientStopSegment();
+    }
+  }
+  crAmbientVadTimer = setTimeout(crAmbientMonitor, 100);
+}
+
+function crAmbientStartSegment() {
+  if (!crAmbientStream || crAmbientRecording || crAmbientEvaluating) return;
+  const mime = _crGetVoiceMime();
+  crAmbientChunks = [];
+  crAmbientDiscardSegment = false;
+  try {
+    crAmbientMediaRecorder = new MediaRecorder(crAmbientStream, mime ? { mimeType: mime } : undefined);
+    crAmbientMediaRecorder.ondataavailable = e => { if (e.data.size > 0) crAmbientChunks.push(e.data); };
+    crAmbientMediaRecorder.onstop = () => {
+      const duration = (Date.now() - crAmbientSegmentStartedAt) / 1000;
+      const blob = new Blob(crAmbientChunks, { type: crAmbientMediaRecorder?.mimeType || mime || 'audio/webm' });
+      const discard = crAmbientDiscardSegment;
+      crAmbientChunks = [];
+      crAmbientMediaRecorder = null;
+      if (!discard) crAmbientHandleBlob(blob, duration);
+    };
+    crAmbientSegmentStartedAt = Date.now();
+    crAmbientSilenceStartedAt = 0;
+    crAmbientRecording = true;
+    crAmbientMediaRecorder.start(250);
+    crAmbientSetStatus('听到人声', 'on');
+  } catch (e) {
+    console.warn('[AmbientVoice] recorder failed:', e);
+    crAmbientRecording = false;
+  }
+}
+
+function crAmbientStopSegment() {
+  if (!crAmbientRecording || !crAmbientMediaRecorder) return;
+  crAmbientRecording = false;
+  try {
+    if (crAmbientMediaRecorder.state !== 'inactive') crAmbientMediaRecorder.stop();
+  } catch {}
+  crAmbientSetStatus(crAmbientWakePendingUntil > Date.now() ? '即时侦听' : '侦听中', 'on');
+}
+
+async function crAmbientHandleBlob(blob, duration) {
+  if (!crAmbientCanRun() || duration < 0.55 || !blob || blob.size < 800) return;
+  crAmbientSetStatus('识别中', 'on');
+  const text = await crAmbientTranscribe(blob);
+  if (!text) {
+    crAmbientSetStatus('侦听中', 'on');
+    return;
+  }
+  await crAmbientHandleTranscript(text);
+}
+
+async function crAmbientTranscribe(blob) {
+  const ext = blob.type.includes('wav') ? 'wav' : (blob.type.includes('mp4') ? 'mp4' : 'webm');
+  for (let i = 0; i < 2; i++) {
+    try {
+      const fd = new FormData();
+      fd.append('file', blob, `ambient.${ext}`);
+      const resp = await fetch('/api/voice/transcribe', { method: 'POST', body: fd });
+      const data = await resp.json();
+      const text = (data.text || '').trim();
+      if (text) return text;
+    } catch (e) {
+      console.warn(`[AmbientVoice] ASR attempt ${i + 1} failed:`, e);
+    }
+  }
+  return '';
+}
+
+function crAmbientTextHasPhrase(text, phrase) {
+  const wake = (phrase || '').trim();
+  if (!wake) return false;
+  const compactText = text.replace(/\s+/g, '');
+  const compactWake = wake.replace(/\s+/g, '');
+  return text.includes(wake) || (compactWake && compactText.includes(compactWake));
+}
+
+function crAmbientTextHasWakeWord(text) {
+  return crAmbientTextHasPhrase(text, crAmbientWakeWord);
+}
+
+function crAmbientTextHasStopWord(text) {
+  return crAmbientTextHasPhrase(text, crAmbientStopWord);
+}
+
+function crAmbientRemoveWakeWord(text) {
+  const wake = (crAmbientWakeWord || '').trim();
+  if (!wake) return text.trim();
+  return text.replaceAll(wake, '').replace(/\s+/g, ' ').trim();
+}
+
+async function crAmbientHandleTranscript(text) {
+  const cleaned = text.replace(/\s+/g, ' ').trim();
+  if (!cleaned || !crAmbientCanRun()) return;
+  if (crAmbientTextHasStopWord(cleaned)) {
+    const wasPending = crAmbientWakePendingUntil > Date.now();
+    crAmbientWakePendingUntil = 0;
+    crAmbientTranscriptBuffer = [];
+    crAmbientUpdateBufferView();
+    crAmbientSetStatus(wasPending ? '即时已结束' : '侦听中', wasPending ? 'warn' : 'on');
+    if (wasPending) {
+      toast('即时侦听已结束');
+      setTimeout(() => { if (crAmbientCanRun()) crAmbientSetStatus('侦听中', 'on'); }, 1800);
+    }
+    return;
+  }
+  if (crAmbientTextHasWakeWord(cleaned)) {
+    const rest = crAmbientRemoveWakeWord(cleaned);
+    crAmbientTranscriptBuffer = [];
+    crAmbientUpdateBufferView();
+    if (rest.length >= 4) {
+      await crAmbientEvaluate(rest, true);
+    } else {
+      crAmbientWakePendingUntil = Date.now() + 20000;
+      crAmbientSetStatus('即时侦听', 'warn');
+    }
+    return;
+  }
+  if (crAmbientWakePendingUntil > Date.now()) {
+    crAmbientWakePendingUntil = 0;
+    await crAmbientEvaluate(cleaned, true);
+    return;
+  }
+
+  crAmbientTranscriptBuffer.push(cleaned);
+  while (crAmbientTranscriptBuffer.join('').length > 2200) crAmbientTranscriptBuffer.shift();
+  crAmbientUpdateBufferView();
+  const total = crAmbientTranscriptBuffer.join('').length;
+  const dueByChars = total >= crAmbientMinChars;
+  const dueByTime = total >= 80 && Date.now() - crAmbientLastCheckAt >= crAmbientIntervalSec * 1000;
+  crAmbientSetStatus(`累计 ${total}`, 'on');
+  if (dueByChars || dueByTime) {
+    const transcript = crAmbientTranscriptBuffer.join('\n');
+    crAmbientTranscriptBuffer = [];
+    crAmbientUpdateBufferView();
+    await crAmbientEvaluate(transcript, false);
+  }
+}
+
+async function crAmbientEvaluate(transcript, forced) {
+  if (!currentRoom || currentRoom.type !== 'group' || crAmbientEvaluating) return;
+  if (!crAmbientOwned) {
+    crAmbientSetStatus('等待接管', 'warn');
+    return;
+  }
+  crAmbientEvaluating = true;
+  crAmbientLastCheckAt = Date.now();
+  crAmbientSetStatus(forced ? '唤醒中' : '筛选中', forced ? 'warn' : 'on');
+  const src = crAmbientSourceInfo();
+  try {
+    const resp = await fetch(`${API}/rooms/${currentRoom.id}/ambient-voice/evaluate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        transcript,
+        forced,
+        listener_client_id: crAmbientClientId,
+        listener_source: src.source,
+        listener_label: src.label,
+        model: chatroomModel,
+        connor_model: chatroomConnorModel,
+        tts_enabled: crTtsEnabled,
+        tts_aion_voice: crTtsAionVoice,
+        tts_connor_voice: crTtsConnorVoice,
+      }),
+    });
+    const result = await resp.json();
+    if (result.debug) crHandleDebug(result.debug);
+    if (result.triggered) {
+      const speakerName = crName(result.speaker);
+      crAmbientSetStatus(`${speakerName} 已唤醒`, 'warn');
+      toast(`${speakerName} 听见了，正在插话`);
+      setTimeout(() => { if (crAmbientCanRun()) crAmbientSetStatus('侦听中', 'on'); }, 2500);
+    } else if (result.skipped === 'cooldown') {
+      crAmbientSetStatus(`冷却 ${result.cooldown_remaining || ''}s`, 'warn');
+    } else if (result.skipped === 'listener_lost' || result.skipped === 'listener_required' || result.skipped === 'listener_expired') {
+      crAmbientApplyListenerState(result.listener || null);
+    } else {
+      crAmbientSetStatus(crAmbientCanRun() ? '侦听中' : '待启动', crAmbientCanRun() ? 'on' : 'warn');
+    }
+  } catch (e) {
+    console.warn('[AmbientVoice] evaluate failed:', e);
+    crAmbientSetStatus('筛选失败', 'err');
+  } finally {
+    crAmbientEvaluating = false;
+  }
+}
+
+window.addEventListener('beforeunload', () => {
+  if (crAmbientOwned) {
+    try {
+      const body = JSON.stringify({ client_id: crAmbientClientId });
+      navigator.sendBeacon?.(`${API}/ambient-voice/release`, new Blob([body], { type: 'application/json' }));
+    } catch(e) {}
+  }
+  crAmbientStop(false);
+});
+
 function crHandleDebug(data) {
   const d = data?.data && data.data.type === 'debug' ? data.data : data;
   if (!d || d.type !== 'debug') return;
@@ -678,6 +1586,50 @@ function crBuildTokenDetailHtml(u) {
   return html;
 }
 
+function crAmbientSkipLabel(reason) {
+  return ({
+    sentinel_rejected: '哨兵未放行',
+    cooldown: '冷却中',
+    already_generating: '已有插话生成中',
+    not_group_room: '不在群聊',
+    disabled: '环境侦听关闭',
+    too_short: '内容过短',
+  })[reason] || reason || '';
+}
+
+function crBuildAmbientLogEntry(d, detailId) {
+  const skipped = d.ambient_skipped || '';
+  const status = d.ambient_should_wake ? '已唤醒' : (skipped ? crAmbientSkipLabel(skipped) : '未唤醒');
+  const statusCls = d.ambient_should_wake ? 'wake' : (skipped === 'sentinel_rejected' ? 'reject' : 'skip');
+  const speaker = d.ambient_speaker ? `，唤醒 ${esc(crName(d.ambient_speaker))}` : '';
+  const topic = d.ambient_topic ? `，话题：${esc(d.ambient_topic)}` : '';
+  const reason = d.ambient_reason || skipped || '';
+  let detailHtml = '';
+  if (d.has_error && d.error_text) {
+    detailHtml += `<div style="color:#f44336;margin-bottom:8px;word-break:break-all;">${esc(d.error_text)}</div>`;
+  }
+  detailHtml += `<div class="debug-recall-keywords">模式: ${d.ambient_forced ? '即时唤醒（不经过哨兵）' : '普通环境哨兵'}</div>`;
+  if (d.ambient_source) detailHtml += `<div class="debug-recall-keywords">音源: ${esc(d.ambient_source)}</div>`;
+  detailHtml += `<div class="debug-recall-keywords">判定: <span class="ambient-log-status ${statusCls}">${esc(status)}</span>${speaker}</div>`;
+  if (reason) detailHtml += `<div class="debug-recall-keywords">原因: ${esc(reason)}</div>`;
+  if (d.ambient_topic) detailHtml += `<div class="debug-recall-keywords">话题: <span style="color:#4fc3f7">${esc(d.ambient_topic)}</span></div>`;
+  if (d.ambient_importance !== undefined) detailHtml += `<div class="debug-recall-keywords">重要度: ${crFixed(d.ambient_importance, 2)}</div>`;
+  if (d.ambient_summary) detailHtml += `<h4>去噪摘要</h4><div class="debug-recall-query">${esc(d.ambient_summary)}</div>`;
+  const prompts = Array.isArray(d.prompt_messages) ? d.prompt_messages : [];
+  if (prompts.length) {
+    const text = prompts.map(m => m.content || '').join('\n\n');
+    detailHtml += `<h4>ASR 原文片段（${d.ambient_transcript_chars || 0} 字）</h4><div class="debug-prompt-list"><div class="debug-prompt-text">${esc(text)}</div></div>`;
+  }
+  return `<div class="${d.has_error ? 'cr-syslog-entry error-entry' : 'cr-syslog-entry'}">
+    <span class="cr-syslog-time">${d._ts}</span>
+    <span class="cr-syslog-model">环境语音哨兵</span>
+    <span class="ambient-log-status ${statusCls}">${esc(status)}</span>
+    <span class="cr-syslog-tokens">${esc(reason)}${topic}</span>
+    ${detailHtml ? `<button class="cr-syslog-detail-toggle" onclick="crToggleSysLogDetail('${detailId}')">详情 ▾</button>` : ''}
+    ${detailHtml ? `<div class="cr-syslog-detail" id="${detailId}">${detailHtml}</div>` : ''}
+  </div>`;
+}
+
 function crRenderSystemLogList() {
   const el = document.getElementById('crSysLogList');
   const countEl = document.getElementById('crSysLogCount');
@@ -689,12 +1641,15 @@ function crRenderSystemLogList() {
   }
 
   el.innerHTML = crSystemLogs.map(d => {
+    const detailId = 'crsd_' + d._id;
+    if (d.log_kind === 'ambient_voice') {
+      return crBuildAmbientLogEntry(d, detailId);
+    }
     const tokenText = crBuildTokenHtml(d.usage);
     const isError = !!d.has_error;
     const mems = Array.isArray(d.recalled_memories) ? d.recalled_memories : [];
     const memText = mems.length ? `🧠 召回 ${mems.length} 条记忆` : '🧠 无相关记忆';
     const memCls = mems.length ? 'cr-syslog-mem' : 'cr-syslog-mem none';
-    const detailId = 'crsd_' + d._id;
     let detailHtml = '';
 
     if (isError && d.error_text) {
@@ -901,6 +1856,7 @@ async function selectRoom(roomId) {
   updateHeaderActions();
   resetChatSearch();
   await loadMessages();
+  crAmbientSyncRunning();
   closeSidebar();
 }
 
@@ -1173,6 +2129,7 @@ function renderMessages(msgs) {
   }
   msgs.forEach(m => { if (m.id) crMessagesById[m.id] = m; });
   messagesEl.innerHTML = crMessagesForDisplay(msgs).map(m => msgHTML(m)).join('');
+  crApplySongGenIndicator();
 }
 
 function crMsgMenuHtml(sender, msgId) {
@@ -1268,16 +2225,19 @@ function msgHTML(m) {
 
   // 用户消息按单换行拆；AI优先按空行拆，兼容 Gemini CLI 的普通单换行段落。
   const isUser = sender === 'user';
-  const raw = m.content || '';
+  const originalRaw = m.content || '';
+  const raw = crStripWishFulfillmentMarker(originalRaw);
+  const messageAttachments = crWithWishFallbackAttachments(m);
 
   // 判断是否为纯语音消息（只有语音附件，content 是转写文本或为空）
-  const hasVoiceAtt = Array.isArray(m.attachments) && m.attachments.some(a => typeof a === 'object' && a.type === 'voice');
-  const isVoiceOnly = hasVoiceAtt && (!raw || m.attachments.some(a => typeof a === 'object' && a.type === 'voice' && a.transcript === raw));
+  const hasVoiceAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'voice');
+  const isVoiceOnly = hasVoiceAtt && (!raw || messageAttachments.some(a => typeof a === 'object' && a.type === 'voice' && a.transcript === raw));
+  const hasWishFulfillmentAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'wish_fulfillment');
 
   // AI 消息使用 escWithImages 解析 [[image:...]] 和转账卡片，用户消息也渲染转账卡片
   const fmt = isUser ? escWithTransfer : escWithImages;
   let bubblesHtml = '';
-  if (!isVoiceOnly) {
+  if (!isVoiceOnly && !hasWishFulfillmentAtt) {
     const parts = crBubbleParts(raw, isUser);
     if (parts.length > 1) {
       bubblesHtml = '<div class="bubbles">' + parts.map(p => `<div class="bubble">${fmt(p)}</div>`).join('') + '</div>';
@@ -1287,8 +2247,8 @@ function msgHTML(m) {
   }
 
   // 渲染附件图片
-  const toyHtml = renderToyAttachments(m.attachments);
-  const attHtml = renderAttachments(m.attachments);
+  const toyHtml = renderToyAttachments(messageAttachments);
+  const attHtml = renderAttachments(messageAttachments);
 
   const msgId = m.id || '';
   const actionHtml = isUser
@@ -1399,70 +2359,9 @@ function toggleMsgMenu(e) {
   dropdown.classList.toggle('show');
 }
 
-function showMsgMenuForRow(row) {
-  if (!row) return;
-  const dropdown = row.querySelector('.msg-menu-dropdown');
-  if (!dropdown) return;
-  document.querySelectorAll('.msg-menu-dropdown.show').forEach(d => { if (d !== dropdown) d.classList.remove('show'); });
-  dropdown.classList.add('show');
-}
-
 function closeMsgMenus() {
   document.querySelectorAll('.msg-menu-dropdown.show').forEach(d => d.classList.remove('show'));
 }
-
-function crMsgMenuRowFromTarget(target) {
-  if (!target || target.closest?.('.msg-menu-wrap, .msg-feedback-popover, button, input, textarea, a')) return null;
-  return target.closest?.('.message-row[data-msg-id], .system-event-msg[data-msg-id]');
-}
-
-messagesEl.addEventListener('contextmenu', e => {
-  const row = crMsgMenuRowFromTarget(e.target);
-  if (!row || !row.querySelector('.msg-menu-dropdown')) return;
-  e.preventDefault();
-  e.stopPropagation();
-  showMsgMenuForRow(row);
-});
-
-let crMsgLongPressTimer = null;
-let crMsgLongPressPoint = null;
-let crMsgLongPressOpened = false;
-
-function crClearMsgLongPress() {
-  if (crMsgLongPressTimer) clearTimeout(crMsgLongPressTimer);
-  crMsgLongPressTimer = null;
-  crMsgLongPressPoint = null;
-}
-
-messagesEl.addEventListener('pointerdown', e => {
-  if (e.pointerType === 'mouse' && e.button !== 0) return;
-  const row = crMsgMenuRowFromTarget(e.target);
-  if (!row || !row.querySelector('.msg-menu-dropdown')) return;
-  crMsgLongPressOpened = false;
-  crMsgLongPressPoint = { x: e.clientX, y: e.clientY, row };
-  crMsgLongPressTimer = setTimeout(() => {
-    crMsgLongPressOpened = true;
-    showMsgMenuForRow(row);
-    try { navigator.vibrate?.(12); } catch {}
-  }, 520);
-});
-
-messagesEl.addEventListener('pointermove', e => {
-  if (!crMsgLongPressPoint) return;
-  const dx = Math.abs(e.clientX - crMsgLongPressPoint.x);
-  const dy = Math.abs(e.clientY - crMsgLongPressPoint.y);
-  if (dx > 8 || dy > 8) crClearMsgLongPress();
-});
-
-['pointerup', 'pointercancel', 'pointerleave'].forEach(type => {
-  messagesEl.addEventListener(type, e => {
-    if (crMsgLongPressOpened) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    crClearMsgLongPress();
-  });
-});
 
 async function deleteMsg(msgId, btnEl) {
   try {
@@ -1607,10 +2506,6 @@ async function regenerateChatroomMsg(msgId) {
 
 // 点击空白处关闭下拉菜单
 document.addEventListener('click', (e) => {
-  if (crMsgLongPressOpened) {
-    crMsgLongPressOpened = false;
-    return;
-  }
   if (crMsgFeedbackPopover && e.target?.closest?.('.msg-feedback-popover, .msg-feedback-btn')) return;
   closeCrMsgFeedbackPopover();
   document.querySelectorAll('.msg-menu-dropdown.show').forEach(d => d.classList.remove('show'));
@@ -1629,6 +2524,8 @@ function appendMessage(m) {
   div.innerHTML = msgHTML(m);
   const row = div.firstElementChild;
   messagesEl.appendChild(row);
+  if (m?.id === crSongGenMsgId) crApplySongGenIndicator();
+  if (crHasGeneratedSongAttachment(m)) crDismissSongGenIndicator({ room_id: m.room_id });
   if (crIsAiSender(m?.sender)) crMovePrecedingRelatedSystemNoticesAfter(row, m.id || '');
   if (m?.id && crMemoryRecordMsgIds.has(m.id)) crApplyMemoryHint(m.id);
   scrollToBottom(m.sender === 'user');
@@ -1681,6 +2578,53 @@ function appendAiChatStatus(text) {
 function removeAiChatStatus() {
   const existing = messagesEl.querySelector('.ai-chat-status');
   if (existing) existing.remove();
+}
+
+let crSongGenRoomId = null;
+let crSongGenMsgId = null;
+let crSongGenSafetyTimer = null;
+
+function crHasGeneratedSongAttachment(msg) {
+  return Array.isArray(msg?.attachments) && msg.attachments.some(item => item && typeof item === 'object' && item.type === 'generated_song');
+}
+
+function crSongGenIndicatorHtml() {
+  return `歌曲谱写中....<span class="sg-dots"><span></span><span></span><span></span></span>`;
+}
+
+function crDismissSongGenIndicator(data = null) {
+  const roomId = data?.room_id || crSongGenRoomId;
+  if (crSongGenRoomId && roomId && roomId !== crSongGenRoomId) return;
+  crSongGenRoomId = null;
+  crSongGenMsgId = null;
+  if (crSongGenSafetyTimer) {
+    clearTimeout(crSongGenSafetyTimer);
+    crSongGenSafetyTimer = null;
+  }
+  const el = document.getElementById('cr_song_gen_loading');
+  if (el) el.remove();
+}
+
+function crApplySongGenIndicator() {
+  if (!currentRoom || !crSongGenRoomId || currentRoom.id !== crSongGenRoomId || !crSongGenMsgId) return;
+  const row = messagesEl.querySelector(crMsgSelector(crSongGenMsgId));
+  if (!row || row.querySelector('.song-gen-indicator')) return;
+  const indicator = document.createElement('div');
+  indicator.className = 'song-gen-indicator';
+  indicator.id = 'cr_song_gen_loading';
+  indicator.innerHTML = crSongGenIndicatorHtml();
+  const msgContent = row.querySelector('.msg-content');
+  (msgContent || row).appendChild(indicator);
+  scrollToBottom();
+}
+
+function crHandleSongGenStart(data) {
+  if (!data?.room_id) return;
+  crDismissSongGenIndicator();
+  crSongGenRoomId = data.room_id;
+  crSongGenMsgId = data.msg_id || null;
+  crApplySongGenIndicator();
+  crSongGenSafetyTimer = setTimeout(() => crDismissSongGenIndicator({ room_id: data.room_id }), 300000);
 }
 
 // ── 流式消息累积 ──
@@ -1939,10 +2883,10 @@ function handleSSE(data) {
       appendAiChatStatus(`AI 互聊 第 ${data.round}/${data.total} 轮`);
       break;
     case 'tts_chunk':
-      crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url);
+      crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url, data.data.created_at, data.data.target_client_id);
       break;
     case 'tts_done':
-      crFinishTTSForMsg(data.data.msg_id);
+      crFinishTTSForMsg(data.data.msg_id, data.data.created_at, data.data.target_client_id);
       break;
     case 'error':
       toast('错误: ' + data.content);
@@ -2064,7 +3008,9 @@ async function openSettings() {
 
   // 先立即打开面板，再异步填充数据（提升感知速度）
   document.getElementById('setTtsEnabled').checked = crTtsEnabled;
+  crAmbientUpdateToggleView();
   document.getElementById('settingsOverlay').classList.add('active');
+  const ambientLoadStartedAt = Date.now();
 
   // 三个请求并行发起，避免串行等待外部服务超时
   const [room, cfg] = await Promise.all([
@@ -2073,6 +3019,12 @@ async function openSettings() {
     crLoadTTSVoices(),
   ]);
   applyChatroomNames(cfg);
+  if (crAmbientLastUserToggleAt <= ambientLoadStartedAt) {
+    crApplyAmbientVoiceConfig(cfg);
+  } else {
+    crAmbientUpdateToggleView();
+    crAmbientUpdateBufferView();
+  }
 
   document.getElementById('setTitle').value = room.title || '';
   document.getElementById('setContextLimit').value = room.context_limit || room.context_minutes || 30;
@@ -2640,13 +3592,16 @@ async function saveSettings() {
       reply_order: nextReplyOrder,
     }),
   });
+  await crSaveAmbientVoiceSettings({ silent: true, sync: false });
   await loadMessages();
 
   // 同步本地变量
   crTtsAionVoice = document.getElementById('setTtsAionVoice').value;
   crTtsConnorVoice = document.getElementById('setTtsConnorVoice').value;
+  crSendTTSState();
   chatroomReplyOrder = nextReplyOrder;
   updateHeaderActions();
+  crAmbientSyncRunning();
 
   // 刷新
   currentRoom.title = document.getElementById('setTitle').value;
@@ -3172,8 +4127,11 @@ function renderEmptyChat() {
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws`);
+  crWs = ws;
 
   ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'register_client', client_id: crAmbientClientId }));
+    crSendTTSState();
     ws.send(JSON.stringify({ type: 'ping' }));
   };
 
@@ -3183,11 +4141,11 @@ function connectWS() {
       if (data.type === 'pong') return;
 
       if (data.type === 'tts_chunk' && data.data) {
-        crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url);
+        crEnqueueTTSChunk(data.data.msg_id, data.data.seq, data.data.url, data.data.created_at, data.data.target_client_id);
       }
 
       if (data.type === 'tts_done' && data.data) {
-        crFinishTTSForMsg(data.data.msg_id);
+        crFinishTTSForMsg(data.data.msg_id, data.data.created_at, data.data.target_client_id);
       }
 
       if (data.type === 'memory_record' && data.data && !isSending && !isAiChatting) {
@@ -3196,6 +4154,10 @@ function connectWS() {
 
       if (data.type === 'debug' && data.data) {
         crHandleDebug(data);
+      }
+
+      if (data.type === 'ambient_voice_listener' && data.data) {
+        crAmbientApplyListenerState(data.data);
       }
 
       if (data.type === 'chatroom_msg_created' && currentRoom) {
@@ -3210,6 +4172,14 @@ function connectWS() {
             }
           }
         }
+      }
+
+      if (data.type === 'chatroom_song_gen_start') {
+        crHandleSongGenStart(data.data || {});
+      }
+
+      if (data.type === 'chatroom_song_gen_done' || data.type === 'chatroom_song_gen_failed') {
+        crDismissSongGenIndicator(data.data || {});
       }
 
       if (data.type === 'chatroom_msg_deleted' && currentRoom) {
@@ -3263,7 +4233,10 @@ function connectWS() {
     } catch {}
   };
 
-  ws.onclose = () => setTimeout(connectWS, 3000);
+  ws.onclose = () => {
+    if (crWs === ws) crWs = null;
+    setTimeout(connectWS, 3000);
+  };
   ws.onerror = () => ws.close();
 }
 
@@ -3333,17 +4306,310 @@ function buildLuckinPaymentCard(item) {
   </div>`;
 }
 
+function crEscJsSingle(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r/g, '').replace(/\n/g, '\\n');
+}
+
+const CR_WISH_FULFILLMENT_MARK_RE = /\u2063wish_fulfillment:([A-Za-z0-9_-]+)\u2063/;
+
+function crStripWishFulfillmentMarker(text) {
+  return String(text || '').replace(CR_WISH_FULFILLMENT_MARK_RE, '');
+}
+
+function crWishFulfillmentFromContent(text) {
+  const raw = String(text || '');
+  const marker = raw.match(CR_WISH_FULFILLMENT_MARK_RE);
+  if (!marker) return null;
+  const clean = crStripWishFulfillmentMarker(raw).trim();
+  const parsed = clean.match(/我捞起了【(.+?)】的愿望，愿望内容：([\s\S]*?)。现在将为他实现。?$/);
+  return {
+    type: 'wish_fulfillment',
+    wish_id: marker[1],
+    author_name: parsed ? parsed[1].trim() : '许愿者',
+    content: parsed ? parsed[2].trim() : clean,
+    status: 'active',
+    message: clean,
+  };
+}
+
+function crWithWishFallbackAttachments(message) {
+  const atts = Array.isArray(message?.attachments) ? message.attachments : [];
+  if (atts.some(item => item && typeof item === 'object' && item.type === 'wish_fulfillment')) return atts;
+  const fallback = crWishFulfillmentFromContent(message?.content || '');
+  return fallback ? [...atts, fallback] : atts;
+}
+
+function crWishCardStatusLabel(status) {
+  return status === 'fulfilled' ? '已完成' : '池中';
+}
+
+function crApplyWishCardStatus(card, status) {
+  const next = status === 'fulfilled' ? 'fulfilled' : 'active';
+  card.dataset.status = next;
+  const stateEl = card.querySelector('.wish-card-state');
+  if (stateEl) stateEl.textContent = crWishCardStatusLabel(next);
+  const hint = card.querySelector('.wish-card-hint');
+  if (hint) hint.textContent = next === 'fulfilled' ? '愿望已标记完成' : '愿望已放回池中';
+  card.querySelectorAll('[data-wish-action]').forEach(btn => {
+    const action = btn.dataset.wishAction;
+    btn.disabled = (action === next);
+  });
+}
+
+async function crSetWishCardStatus(btn, wishId, status) {
+  const card = btn?.closest('.wish-fulfill-card');
+  if (!wishId || !card) return;
+  if (status === 'active') {
+    const hint = card.querySelector('.wish-card-hint');
+    if (hint) hint.textContent = card.dataset.status === 'fulfilled' ? '愿望已经完成，记录保持不变' : '愿望还在池中';
+    toast('愿望仍在池中');
+    return;
+  }
+  const buttons = card.querySelectorAll('[data-wish-action]');
+  buttons.forEach(item => { item.disabled = true; });
+  const hint = card.querySelector('.wish-card-hint');
+  if (hint) hint.textContent = '更新中...';
+  try {
+    const res = await fetch(`/api/wishes/${encodeURIComponent(wishId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error('request failed');
+    const updated = await res.json();
+    document.querySelectorAll('.wish-fulfill-card').forEach(item => {
+      if (item.dataset.wishId === wishId) crApplyWishCardStatus(item, updated.status || status);
+    });
+    toast(status === 'fulfilled' ? '愿望已完成' : '愿望已放回池中');
+  } catch (e) {
+    if (hint) hint.textContent = '更新失败，稍后再试';
+    buttons.forEach(item => { item.disabled = false; });
+    toast('更新失败');
+  }
+}
+
+function crBuildWishFulfillmentCard(item) {
+  const wishId = String(item.wish_id || '');
+  const status = item.status === 'fulfilled' ? 'fulfilled' : 'active';
+  const idArg = crEscJsSingle(wishId);
+  const activeDisabled = '';
+  const fulfilledDisabled = status === 'fulfilled' ? ' disabled' : '';
+  const authorName = esc(item.author_name || '许愿者');
+  const content = esc(item.content || crStripWishFulfillmentMarker(item.message || ''));
+  return `<div class="wish-fulfill-card" data-wish-id="${esc(wishId)}" data-status="${status}">
+    <div class="wish-card-head">
+      <span>许愿池愿望</span>
+      <span class="wish-card-state">${crWishCardStatusLabel(status)}</span>
+    </div>
+    <div class="wish-card-from">来自【${authorName}】</div>
+    <div class="wish-card-content">${content}</div>
+    <div class="wish-card-actions">
+      <button type="button" data-wish-action="active" onclick="crSetWishCardStatus(this,'${idArg}','active')"${activeDisabled}>放回池中</button>
+      <button type="button" data-wish-action="fulfilled" onclick="crSetWishCardStatus(this,'${idArg}','fulfilled')"${fulfilledDisabled}>已完成</button>
+    </div>
+    <div class="wish-card-hint"></div>
+  </div>`;
+}
+
+const crGeneratedSongPlayerStore = {};
+let crGeneratedSongPlayerSeq = 0;
+let crGeneratedSongAudio = null;
+let crGeneratedSongProgressFrame = null;
+
+function crRegisterGeneratedSongItem(item) {
+  const key = `cr_song_${Date.now()}_${crGeneratedSongPlayerSeq++}`;
+  crGeneratedSongPlayerStore[key] = item || {};
+  return key;
+}
+
+function crExtractGeneratedSongLyrics(item) {
+  const direct = (item && item.lyrics) ? String(item.lyrics).trim() : '';
+  if (direct) return direct;
+  const prompt = (item && item.prompt) ? String(item.prompt) : '';
+  const match = prompt.match(/^\s*Lyrics\s*:\s*([\s\S]+)$/im);
+  if (match && match[1].trim()) return match[1].trim();
+  const desc = (item && item.description) ? String(item.description).trim() : '';
+  return desc || '';
+}
+
+function crFormatGeneratedSongTime(seconds) {
+  const sec = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function crCloseGeneratedSongPlayer() {
+  if (crGeneratedSongProgressFrame) {
+    cancelAnimationFrame(crGeneratedSongProgressFrame);
+    crGeneratedSongProgressFrame = null;
+  }
+  if (crGeneratedSongAudio) {
+    crGeneratedSongAudio.pause();
+    crGeneratedSongAudio.src = '';
+    crGeneratedSongAudio = null;
+  }
+  const overlay = document.getElementById('crGeneratedSongPlayerOverlay');
+  if (overlay) overlay.remove();
+}
+
+function crOpenGeneratedSongPlayer(key) {
+  const item = crGeneratedSongPlayerStore[key];
+  if (!item || !item.url) return;
+  crCloseGeneratedSongPlayer();
+
+  const title = item.title || 'AI 生成歌曲';
+  const model = item.model || 'lyria-3-pro-preview';
+  const lyrics = crExtractGeneratedSongLyrics(item);
+  const overlay = document.createElement('div');
+  overlay.id = 'crGeneratedSongPlayerOverlay';
+  overlay.className = 'song-player-overlay';
+  overlay.innerHTML = `
+    <div class="song-player-sheet" role="dialog" aria-modal="true" aria-label="歌曲播放器">
+      <button class="song-player-close" type="button" aria-label="关闭">×</button>
+      <div class="song-player-head">
+        <div class="song-player-cover" aria-hidden="true"><span></span></div>
+        <div class="song-player-info">
+          <div class="song-player-kicker">Generated Song</div>
+          <div class="song-player-title">${esc(title)}</div>
+          <div class="song-player-meta">${esc(model)}</div>
+        </div>
+      </div>
+      <div class="song-player-controls">
+        <button class="song-player-play" type="button">播放</button>
+        <div class="song-player-progress-wrap">
+          <input class="song-player-progress" type="range" min="0" max="1000" value="0" aria-label="播放进度">
+          <div class="song-player-time"><span class="song-player-current">0:00</span><span class="song-player-duration">0:00</span></div>
+        </div>
+      </div>
+      <div class="song-player-lyrics-title">歌词</div>
+      <div class="song-player-lyrics">${lyrics ? esc(lyrics) : '<span class="song-player-empty">暂无歌词</span>'}</div>
+    </div>
+  `;
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) crCloseGeneratedSongPlayer();
+  });
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('active'));
+
+  const audio = new Audio(item.url);
+  crGeneratedSongAudio = audio;
+  const playBtn = overlay.querySelector('.song-player-play');
+  const progress = overlay.querySelector('.song-player-progress');
+  const currentEl = overlay.querySelector('.song-player-current');
+  const durationEl = overlay.querySelector('.song-player-duration');
+  const cover = overlay.querySelector('.song-player-cover');
+
+  function setProgressValue(pct) {
+    const safePct = Math.min(1000, Math.max(0, pct || 0));
+    progress.value = String(safePct);
+    progress.style.setProperty('--song-progress', `${safePct / 10}%`);
+  }
+
+  function updateProgress() {
+    const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+    const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    const pct = duration > 0 ? Math.round((current / duration) * 1000) : 0;
+    setProgressValue(pct);
+    durationEl.textContent = crFormatGeneratedSongTime(duration);
+    currentEl.textContent = crFormatGeneratedSongTime(current);
+  }
+
+  function stopProgressLoop() {
+    if (crGeneratedSongProgressFrame) {
+      cancelAnimationFrame(crGeneratedSongProgressFrame);
+      crGeneratedSongProgressFrame = null;
+    }
+  }
+
+  function startProgressLoop() {
+    stopProgressLoop();
+    const tick = () => {
+      updateProgress();
+      if (crGeneratedSongAudio === audio && !audio.paused && !audio.ended) {
+        crGeneratedSongProgressFrame = requestAnimationFrame(tick);
+      }
+    };
+    crGeneratedSongProgressFrame = requestAnimationFrame(tick);
+  }
+
+  overlay.querySelector('.song-player-close')?.addEventListener('click', crCloseGeneratedSongPlayer);
+  playBtn.addEventListener('click', async () => {
+    if (audio.paused) {
+      try { await audio.play(); } catch(e) {}
+    } else {
+      audio.pause();
+    }
+  });
+  progress.addEventListener('input', () => {
+    const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+    if (!duration) return;
+    audio.currentTime = (Number(progress.value) / 1000) * duration;
+    updateProgress();
+  });
+  audio.addEventListener('play', () => {
+    playBtn.textContent = '暂停';
+    cover.classList.add('playing');
+    startProgressLoop();
+  });
+  audio.addEventListener('pause', () => {
+    playBtn.textContent = '播放';
+    cover.classList.remove('playing');
+    stopProgressLoop();
+    updateProgress();
+  });
+  audio.addEventListener('ended', () => {
+    playBtn.textContent = '播放';
+    cover.classList.remove('playing');
+    stopProgressLoop();
+    updateProgress();
+  });
+  audio.addEventListener('loadedmetadata', updateProgress);
+  audio.addEventListener('durationchange', updateProgress);
+  audio.addEventListener('timeupdate', updateProgress);
+  audio.addEventListener('seeking', updateProgress);
+  audio.addEventListener('seeked', updateProgress);
+  updateProgress();
+}
+
+function crBuildGeneratedSongCard(item) {
+  const key = crRegisterGeneratedSongItem(item);
+  const keyArg = crEscJsSingle(key);
+  const url = esc(item.url || '');
+  const title = esc(item.title || 'AI 生成歌曲');
+  const model = esc(item.model || 'lyria-3-pro-preview');
+  const mime = esc(item.mime_type || 'audio/mpeg');
+  return `<div class="generated-song-card" data-song-key="${esc(key)}">
+    <div class="generated-song-main">
+      <div class="generated-song-icon" aria-hidden="true"><span></span></div>
+      <div class="generated-song-copy">
+        <div class="generated-song-title">${title}</div>
+        <div class="generated-song-meta">${model}</div>
+      </div>
+    </div>
+    <div class="generated-song-actions">
+      <button type="button" class="generated-song-open" onclick="crOpenGeneratedSongPlayer('${keyArg}')">打开播放器</button>
+      <audio controls preload="metadata" src="${url}" type="${mime}"></audio>
+    </div>
+  </div>`;
+}
+
 function renderAttachments(atts) {
   if (!atts || !atts.length) return '';
   let html = '';
   let musicHtml = '';
+  let wishHtml = '';
   atts.forEach(item => {
     const url = typeof item === 'string' ? item : (item.url || '');
     const type = (typeof item === 'object' && item.type) || '';
     if (type === 'luckin_payment') {
       html += buildLuckinPaymentCard(item);
+    } else if (type === 'wish_fulfillment') {
+      wishHtml += crBuildWishFulfillmentCard(item);
     } else if (type === 'music') {
       musicHtml += crBuildMusicCardHtml(item);
+    } else if (type === 'generated_song') {
+      html += crBuildGeneratedSongCard(item);
     } else if (type === 'toy') {
       return;
     } else if (type === 'voice') {
@@ -3357,12 +4623,17 @@ function renderAttachments(atts) {
       </div>`;
       if (item.transcript) html += `<div class="vb-transcript">${esc(item.transcript)}</div>`;
     } else if (url) {
-      html += `<img src="${esc(url)}" onclick="openImageViewer(this.src)">`;
+      if (/\.(mp3|wav|m4a|aac|ogg)$/i.test(url)) {
+        html += `<audio src="${esc(url)}" controls preload="metadata"></audio>`;
+      } else {
+        html += `<img src="${esc(url)}" onclick="openImageViewer(this.src)">`;
+      }
     }
   });
   const musicBlock = musicHtml ? '<div class="music-cards-container">' + musicHtml + '</div>' : '';
+  const wishBlock = wishHtml || '';
   const mediaBlock = html ? '<div class="msg-media">' + html + '</div>' : '';
-  return musicBlock + mediaBlock;
+  return musicBlock + wishBlock + mediaBlock;
 }
 
 async function handleChatroomFileSelect(input) {
@@ -3661,6 +4932,7 @@ let _crVoiceOverlay = null;
 let _crVoiceCancelled = false;
 let _crVoiceNativeChunks = [];
 let _crVoiceUseNative = false;
+let _crVoiceResumeAmbient = false;
 
 // 语音消息播放
 let _crVoiceAudio = null;
@@ -3709,6 +4981,11 @@ function _crInitVoiceHoldBtn() {
 
 async function _crVoiceStartRecord(evt) {
   if (_crVoiceRecording || isSending) return;
+  _crVoiceResumeAmbient = false;
+  if (crAmbientUseNative && crAmbientCanRun()) {
+    _crVoiceResumeAmbient = true;
+    crAmbientStop(false);
+  }
   _crVoiceRecording = true;
   _crVoiceCancelled = false;
   _crVoiceChunks = [];
@@ -3831,6 +5108,10 @@ function _crVoiceCleanup() {
   _crVoiceRecording = false; _crVoiceChunks = []; _crVoiceNativeChunks = [];
   const btn = document.getElementById('crVoiceHoldBtn');
   if (btn) { btn.classList.remove('recording'); btn.textContent = '按住 说话'; }
+  if (_crVoiceResumeAmbient) {
+    _crVoiceResumeAmbient = false;
+    setTimeout(() => crAmbientSyncRunning(), 350);
+  }
 }
 
 function _crBuildWav(chunks) {
@@ -4245,6 +5526,8 @@ function crToyCloseEditor() { document.getElementById('crToyEditorOverlay').clas
     crTtsConnorVoice = cfg.tts_connor_voice || '';
     chatroomConnorModel = cfg.connor_model || 'Codex';
     chatroomReplyOrder = cfg.reply_order || 'random';
+    crApplyAmbientVoiceConfig(cfg);
+    await crAmbientRefreshListenerState();
   } catch(e) {}
   await fetchCurrentModel();
   await loadRooms();
@@ -4258,6 +5541,7 @@ function crToyCloseEditor() { document.getElementById('crToyEditorOverlay').clas
   } else if (!currentRoom && rooms.length > 0) {
     await selectRoom(rooms[0].id);
   }
+  crAmbientSyncRunning();
   connectWS();
   resizeInput();
 })();

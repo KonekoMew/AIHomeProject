@@ -5,7 +5,7 @@
 - 通过 WebSocket 推送音频 URL 给前端顺序播放
 """
 
-import re, asyncio, logging
+import re, asyncio, logging, time
 from pathlib import Path
 import httpx
 
@@ -321,7 +321,10 @@ class TTSStreamer:
     async def _notify(self, payload: dict):
         """通过 WebSocket 或 SSE Queue 推送事件"""
         if self._ws:
-            await self._ws.broadcast(payload)
+            if payload.get("type") in {"tts_chunk", "tts_done", "tts_merged"} and hasattr(self._ws, "send_tts_event"):
+                await self._ws.send_tts_event(payload)
+            else:
+                await self._ws.broadcast(payload)
         if self._sse_queue:
             await self._sse_queue.put(payload)
 
@@ -383,7 +386,7 @@ class TTSStreamer:
         # 通知前端该消息的 TTS 分段已全部推送完毕
         await self._notify({
             "type": "tts_done",
-            "data": {"msg_id": self.msg_id}
+            "data": {"msg_id": self.msg_id, "created_at": time.time()}
         })
 
         if self._merge_segments:
@@ -408,7 +411,8 @@ class TTSStreamer:
                 "type": "tts_merged",
                 "data": {
                     "msg_id": self.msg_id,
-                    "url": f"{self._audio_url_prefix}/{safe_id}"
+                    "url": f"{self._audio_url_prefix}/{safe_id}",
+                    "created_at": time.time(),
                 }
             })
             log.info("TTS merged audio ready: msg=%s segments=%d", self.msg_id, len(paths))
@@ -454,7 +458,8 @@ class TTSStreamer:
                 "data": {
                     "msg_id": self.msg_id,
                     "seq": seq,
-                    "url": f"{self._audio_url_prefix}/{chunk_name}"
+                    "url": f"{self._audio_url_prefix}/{chunk_name}",
+                    "created_at": time.time(),
                 }
             })
             log.info("TTS chunk pushed: msg=%s seq=%d len=%d", self.msg_id, seq, len(text))

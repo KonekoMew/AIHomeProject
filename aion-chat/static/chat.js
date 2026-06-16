@@ -758,6 +758,24 @@ async function toggleImageGenEnabled() {
 })();
 
 // ── CLI 工具调用开关 ──
+async function toggleSongGenEnabled() {
+  const enabled = $('songGenToggle').checked;
+  try {
+    await fetch('/api/settings/song-gen', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ enabled })
+    });
+  } catch(e) { console.warn('保存歌曲生成设置失败', e); }
+}
+(async function initSongGenToggle() {
+  try {
+    const r = await fetch('/api/settings/song-gen');
+    const d = await r.json();
+    $('songGenToggle').checked = !!d.song_gen_enabled;
+  } catch(e) {}
+})();
+
 async function toggleGeminiCliTools() {
   const enabled = $('geminiCliToolsToggle').checked;
   try {
@@ -786,6 +804,8 @@ let ttsManualStop = false;
 // 分段播放队列：{ msgId: { nextPlay: 0, chunks: {seq: url}, playing: bool } }
 let ttsChunkQueues = {};
 let ttsPlayOrder = []; // 按到达顺序记录 msgId，确保跨消息顺序播放
+let ttsAcceptAfter = Date.now() / 1000;
+const ttsSuppressedMsgIds = new Set();
 
 function clearTTSResumeTimer() {
   if (ttsResumeTimer) {
@@ -806,24 +826,94 @@ function scheduleTTSResume() {
   }, 1500);
 }
 
-function _sendTTSState() {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({type: 'tts_state', enabled: ttsEnabled, voice: ttsVoiceId}));
+function isTTSPlaybackAllowed() {
+  return document.visibilityState !== 'hidden';
+}
+
+function stopLiveTTSQueue() {
+  ttsManualStop = true;
+  clearTTSResumeTimer();
+  ttsAudio.pause();
+  ttsAudio.src = '';
+  ttsChunkQueues = {};
+  ttsPlayOrder = [];
+  ttsPlaying = false;
+  if (voiceInCall || (typeof videoCall !== 'undefined' && videoCall.active)) {
+    notifyVoiceAiSpeaking(false);
   }
 }
+
+function suppressTTSMsg(msgId) {
+  if (msgId) ttsSuppressedMsgIds.add(msgId);
+}
+
+function shouldAcceptTTSMsg(msgId, createdAt, targetClientId) {
+  if (!msgId || ttsSuppressedMsgIds.has(msgId)) return false;
+  if (targetClientId && targetClientId !== _clientId) return false;
+  if (!isTTSPlaybackAllowed()) {
+    suppressTTSMsg(msgId);
+    stopLiveTTSQueue();
+    return false;
+  }
+  const ts = Number(createdAt || 0);
+  if (ts && ts < ttsAcceptAfter) {
+    suppressTTSMsg(msgId);
+    return false;
+  }
+  return true;
+}
+
+function _sendTTSState() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'tts_state',
+      enabled: ttsEnabled,
+      voice: ttsVoiceId,
+      can_play: isTTSPlaybackAllowed(),
+      active_at: Date.now() / 1000,
+      client_id: _clientId
+    }));
+  }
+}
+
+function refreshTTSPlaybackState() {
+  ttsAcceptAfter = Date.now() / 1000;
+  if (!isTTSPlaybackAllowed()) stopLiveTTSQueue();
+  _sendTTSState();
+}
+
+function suspendTTSPlaybackState() {
+  ttsAcceptAfter = Date.now() / 1000;
+  stopLiveTTSQueue();
+  _sendTTSState();
+}
+
+let ttsPlaybackStateLastSent = 0;
+function bumpTTSPlaybackState() {
+  const now = Date.now();
+  if (now - ttsPlaybackStateLastSent < 1000) return;
+  ttsPlaybackStateLastSent = now;
+  _sendTTSState();
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (isTTSPlaybackAllowed()) refreshTTSPlaybackState();
+  else suspendTTSPlaybackState();
+});
+window.addEventListener('pagehide', suspendTTSPlaybackState);
+window.addEventListener('pageshow', refreshTTSPlaybackState);
+document.addEventListener('freeze', suspendTTSPlaybackState);
+window.addEventListener('focus', bumpTTSPlaybackState);
+document.addEventListener('pointerdown', bumpTTSPlaybackState, { passive: true });
+document.addEventListener('keydown', bumpTTSPlaybackState);
 
 function toggleTTS() {
   ttsEnabled = $('ttsToggle').checked;
   localStorage.setItem('aion_tts_enabled', ttsEnabled);
+  ttsAcceptAfter = Date.now() / 1000;
   _sendTTSState();
   if (!ttsEnabled) {
-    ttsManualStop = true;
-    clearTTSResumeTimer();
-    ttsAudio.pause();
-    ttsAudio.src = '';
-    ttsChunkQueues = {};
-    ttsPlayOrder = [];
-    ttsPlaying = false;
+    stopLiveTTSQueue();
   }
 }
 
@@ -847,6 +937,7 @@ async function refreshTTSVoices() {
         ttsVoiceId = data.voices[0].uri;
         localStorage.setItem('aion_tts_voice', ttsVoiceId);
         sel.value = ttsVoiceId;
+        _sendTTSState();
       }
     } else {
       sel.innerHTML = '<option value="">无可用音色</option>';
@@ -856,11 +947,12 @@ async function refreshTTSVoices() {
   }
 }
 
-function enqueueTTSChunk(msgId, seq, url) {
+function enqueueTTSChunk(msgId, seq, url, createdAt, targetClientId) {
   const isChatroomTTS = msgId.startsWith('cm_');
   if (!isChatroomTTS && !ttsEnabled && !(typeof videoCall !== 'undefined' && videoCall.active)) return;
   // 忽略小剧场的 TTS（tm_ 前缀），避免重复播放
   if (msgId.startsWith('tm_')) return;
+  if (!shouldAcceptTTSMsg(msgId, createdAt, targetClientId)) return;
   if (!ttsChunkQueues[msgId]) {
     ttsChunkQueues[msgId] = { nextPlay: 0, chunks: {} };
     ttsPlayOrder.push(msgId);
@@ -951,7 +1043,13 @@ async function playNextTTSChunk() {
   }
 }
 
-function finishTTSForMsg(msgId) {
+function finishTTSForMsg(msgId, createdAt, targetClientId) {
+  if (targetClientId && targetClientId !== _clientId) return;
+  const ts = Number(createdAt || 0);
+  if (ttsSuppressedMsgIds.has(msgId) || (ts && ts < ttsAcceptAfter)) {
+    ttsSuppressedMsgIds.delete(msgId);
+    return;
+  }
   // 标记某条消息的 TTS 分段全部到达，如果已经播完所有分段则清理
   const q = ttsChunkQueues[msgId];
   if (!q) return;
@@ -1082,7 +1180,10 @@ async function api(method, url, body) {
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onopen = () => { _sendTTSState(); ws.send(JSON.stringify({type:'register_client',client_id:_clientId})); };
+  ws.onopen = () => {
+    ws.send(JSON.stringify({type:'register_client',client_id:_clientId}));
+    _sendTTSState();
+  };
   ws.onmessage = e => handleSync(JSON.parse(e.data));
   ws.onclose = () => setTimeout(connectWS, 2000);
 }
@@ -1214,6 +1315,14 @@ function handleSync(msg) {
     if (data.conv_id === currentConvId) {
       dismissImageGenIndicator();
     }
+  } else if (type === "song_gen_start") {
+    if (data.conv_id === currentConvId && !streamingAiId) {
+      handleSongGenStart(data);
+    }
+  } else if (type === "song_gen_done" || type === "song_gen_failed") {
+    if (data.conv_id === currentConvId) {
+      dismissSongGenIndicator();
+    }
   } else if (type === "schedule_alarm") {
     showAlarmPopup(data);
   } else if (type === "monitor_alert") {
@@ -1235,10 +1344,10 @@ function handleSync(msg) {
     }
   } else if (type === "tts_chunk") {
     // 服务端流式 TTS 分段音频到达
-    enqueueTTSChunk(data.msg_id, data.seq, data.url);
+    enqueueTTSChunk(data.msg_id, data.seq, data.url, data.created_at, data.target_client_id);
   } else if (type === "tts_done") {
     // 服务端通知该消息的所有 TTS 分段已推送完毕
-    finishTTSForMsg(data.msg_id);
+    finishTTSForMsg(data.msg_id, data.created_at, data.target_client_id);
   } else if (type === "video_call_ring") {
     // AI 发起视频通话 — 定向推送到本客户端
     if (typeof videoCall !== 'undefined') videoCall.aiInitiate(data);
@@ -1399,19 +1508,24 @@ function renderMessages() {
       <button class="msg-feedback-btn ${m.ai_feedback_rating === 'like' ? 'active' : ''}" onclick="openMsgFeedback(event,'${m.id}','like')" title="喜欢这条回复">👍</button>
       <button class="msg-feedback-btn ${m.ai_feedback_rating === 'dislike' ? 'active' : ''}" onclick="openMsgFeedback(event,'${m.id}','dislike')" title="不喜欢这条回复">👎</button>
     </span>` : '';
-    const displayContent = isUser ? m.content : m.content.replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
-    const hasVoiceAtt = m.attachments && m.attachments.some(a => typeof a === 'object' && (a.type === 'voice' || a.type === 'video_clip'));
+    const messageAttachments = withWishFallbackAttachments(m);
+    const rawDisplayContent = isUser ? (m.content || '') : (m.content || '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
+    const displayContent = stripWishFulfillmentMarker(rawDisplayContent).trim();
+    const hasVoiceAtt = messageAttachments.some(a => typeof a === 'object' && (a.type === 'voice' || a.type === 'video_clip'));
+    const hasWishFulfillmentAtt = messageAttachments.some(a => typeof a === 'object' && a.type === 'wish_fulfillment');
     // 转账标签前后强制换行，确保卡片独占一个气泡
     const splitContent = displayContent.replace(/(\[转账(?:给[^\uff1a:]+?)?[：:]\s*-?\d+(?:\.\d+)?\s*元\])/g, '\n$1\n');
     const parts = (isUser ? splitContent.split(/\n+/) : splitContent.split(/\n+/)).filter(p => p.trim());
     let bubblesHtml;
-    if (hasVoiceAtt && !displayContent.trim()) {
+    if (hasWishFulfillmentAtt) {
+      bubblesHtml = `<div class="msg-bubbles wish-card-bubbles">${renderAttachments(messageAttachments)}</div>`;
+    } else if (hasVoiceAtt && !displayContent.trim()) {
       // 纯语音消息：不显示文本气泡，只显示语音气泡
-      bubblesHtml = `<div class="msg-bubble" style="background:transparent;padding:0;box-shadow:none;border:none">${renderAttachments(m.attachments)}</div>`;
+      bubblesHtml = `<div class="msg-bubble" style="background:transparent;padding:0;box-shadow:none;border:none">${renderAttachments(messageAttachments)}</div>`;
     } else if (parts.length > 1) {
-      bubblesHtml = '<div class="msg-bubbles">' + parts.map(p => `<div class="msg-bubble">${formatMsg(p)}</div>`).join('') + renderAttachments(m.attachments) + '</div>';
+      bubblesHtml = '<div class="msg-bubbles">' + parts.map(p => `<div class="msg-bubble">${formatMsg(p)}</div>`).join('') + renderAttachments(messageAttachments) + '</div>';
     } else {
-      bubblesHtml = `<div class="msg-bubble">${formatMsg(displayContent)}${renderAttachments(m.attachments)}</div>`;
+      bubblesHtml = `<div class="msg-bubble">${formatMsg(displayContent)}${renderAttachments(messageAttachments)}</div>`;
     }
     const avatarSrc = isUser ? '/public/UserIcon.png' : '/public/AIIcon.png';
     const ttsBtn = !isUser ? `<button class="tts-replay-btn" onclick="replayTTS('${m.id}')" title="重听语音">🔊</button>` : '';
@@ -1484,6 +1598,18 @@ function renderMessages() {
       indicator.className = 'image-gen-indicator';
       indicator.id = 'image_gen_loading';
       indicator.innerHTML = `🎨 ${escHtml(aiName)} 正在发送图片<span class="ig-dots"><span></span><span></span><span></span></span>`;
+      const msgBody = row.querySelector('.msg-body');
+      (msgBody || row).appendChild(indicator);
+    }
+  }
+  // Restore [SONG] generation indicator after message re-render.
+  if (songGenMsgId) {
+    const row = document.getElementById('m_' + songGenMsgId);
+    if (row && !row.querySelector('.song-gen-indicator')) {
+      const indicator = document.createElement('div');
+      indicator.className = 'song-gen-indicator';
+      indicator.id = 'song_gen_loading';
+      indicator.innerHTML = `歌曲谱写中....<span class="sg-dots"><span></span><span></span><span></span></span>`;
       const msgBody = row.querySelector('.msg-body');
       (msgBody || row).appendChild(indicator);
     }
@@ -2233,7 +2359,7 @@ async function _processSSEStream(res) {
           } else if (data.type === "chunk" || data.type === "replace") {
             _stopTypingAnim();
             aiContent = data.type === "replace" ? data.content : aiContent + data.content;
-            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
+            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
             const mi = currentMessages.findIndex(m => m.id === aiMsgId);
             if (mi >= 0) currentMessages[mi].content = display;
             const container = document.getElementById(`m_${aiMsgId}`);
@@ -2284,6 +2410,8 @@ async function _processSSEStream(res) {
             if (typeof videoCall !== 'undefined') videoCall.handleIncomingIndicator(data);
           } else if (data.type === "image_gen_start") {
             handleImageGenStart(data);
+          } else if (data.type === "song_gen_start") {
+            handleSongGenStart(data);
           }
         } catch {}
       }
@@ -2401,7 +2529,7 @@ async function saveEdit(id) {
           } else if (data.type === 'chunk' || data.type === 'replace') {
             _stopTypingAnim();
             aiContent = data.type === 'replace' ? data.content : aiContent + data.content;
-            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
+            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
             const mi = currentMessages.findIndex(m => m.id === aiMsgId);
             if (mi >= 0) currentMessages[mi].content = display;
             const container = document.getElementById(`m_${aiMsgId}`);
@@ -2452,6 +2580,8 @@ async function saveEdit(id) {
             if (typeof videoCall !== 'undefined') videoCall.handleIncomingIndicator(data);
           } else if (data.type === 'image_gen_start') {
             handleImageGenStart(data);
+          } else if (data.type === 'song_gen_start') {
+            handleSongGenStart(data);
           }
         } catch {}
       }
@@ -2532,7 +2662,7 @@ async function regenerateMsg(aiMsgId) {
           } else if (d.type === "chunk" || d.type === "replace") {
             _stopTypingAnim();
             aiContent = d.type === "replace" ? d.content : aiContent + d.content;
-            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
+            const display = aiContent.replace(/\[CAM_CHECK\]/g, '').replace(/\[POI_SEARCH:[^\]]*\]/g, '').replace(/\[MUSIC:[^\]]*\]/g, '').replace(/\[ALARM:[^\]]*\]/g, '').replace(/\[REMINDER:[^\]]*\]/g, '').replace(/\[Monitor:[^\]]*\]/g, '').replace(/\[SCHEDULE_DEL:[^\]]*\]/g, '').replace(/\[SCHEDULE_LIST\]/g, '').replace(/\[TOY:[^\]]*\]/g, '').replace(/\[HEART:[^\]]*\]/g, '').replace(/\[MEMORY:[^\]]*\]/g, '').replace(/\[查看动态:\d+\]/g, '').replace(/\[视频电话\]/g, '').replace(/\[SELFIE:\s*[^\]]*\]/g, '').replace(/\[DRAW:\s*[^\]]*\]/g, '').replace(/\[SONG\][\s\S]*?\[\/SONG\]/gi, '').replace(/<meta>[\s\S]*?<\/meta>/g, '').trim();
             const mi = currentMessages.findIndex(m => m.id === newId);
             if (mi >= 0) currentMessages[mi].content = display;
             const b = document.querySelector(`#m_${newId} .msg-bubble`);
@@ -2565,6 +2695,8 @@ async function regenerateMsg(aiMsgId) {
             if (typeof videoCall !== 'undefined') videoCall.handleIncomingIndicator(d);
           } else if (d.type === "image_gen_start") {
             handleImageGenStart(d);
+          } else if (d.type === "song_gen_start") {
+            handleSongGenStart(d);
           }
         } catch {}
       }
@@ -2727,6 +2859,31 @@ function handleImageGenStart(data) {
   }
   // 保底120秒安全超时（生图较慢）
   imageGenSafetyTimer = setTimeout(() => dismissImageGenIndicator(), 120000);
+}
+
+let songGenMsgId = null;
+let songGenSafetyTimer = null;
+function dismissSongGenIndicator() {
+  songGenMsgId = null;
+  if (songGenSafetyTimer) { clearTimeout(songGenSafetyTimer); songGenSafetyTimer = null; }
+  const el = document.getElementById('song_gen_loading');
+  if (el) el.remove();
+}
+function handleSongGenStart(data) {
+  const msgId = data.msg_id;
+  if (songGenMsgId) return;
+  songGenMsgId = msgId;
+  const msgRow = msgId ? document.getElementById('m_' + msgId) : null;
+  if (msgRow) {
+    const indicator = document.createElement('div');
+    indicator.className = 'song-gen-indicator';
+    indicator.id = 'song_gen_loading';
+    indicator.innerHTML = `歌曲谱写中....<span class="sg-dots"><span></span><span></span><span></span></span>`;
+    const msgBody = msgRow.querySelector('.msg-body');
+    (msgBody || msgRow).appendChild(indicator);
+    scrollBottom();
+  }
+  songGenSafetyTimer = setTimeout(() => dismissSongGenIndicator(), 300000);
 }
 
 // ── 图片查看器（Lightbox） ──
@@ -2948,17 +3105,307 @@ function buildLuckinPaymentCard(item) {
   </div>`;
 }
 
+function escJsSingle(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r/g, '').replace(/\n/g, '\\n');
+}
+
+const WISH_FULFILLMENT_MARK_RE = /\u2063wish_fulfillment:([A-Za-z0-9_-]+)\u2063/;
+
+function stripWishFulfillmentMarker(text) {
+  return String(text || '').replace(WISH_FULFILLMENT_MARK_RE, '');
+}
+
+function wishFulfillmentFromContent(text) {
+  const raw = String(text || '');
+  const marker = raw.match(WISH_FULFILLMENT_MARK_RE);
+  if (!marker) return null;
+  const clean = stripWishFulfillmentMarker(raw).trim();
+  const parsed = clean.match(/我捞起了【(.+?)】的愿望，愿望内容：([\s\S]*?)。现在将为他实现。?$/);
+  return {
+    type: 'wish_fulfillment',
+    wish_id: marker[1],
+    author_name: parsed ? parsed[1].trim() : '许愿者',
+    content: parsed ? parsed[2].trim() : clean,
+    status: 'active',
+    message: clean,
+  };
+}
+
+function withWishFallbackAttachments(message) {
+  const atts = Array.isArray(message?.attachments) ? message.attachments : [];
+  if (atts.some(item => item && typeof item === 'object' && item.type === 'wish_fulfillment')) return atts;
+  const fallback = wishFulfillmentFromContent(message?.content || '');
+  return fallback ? [...atts, fallback] : atts;
+}
+
+function wishCardStatusLabel(status) {
+  return status === 'fulfilled' ? '已完成' : '池中';
+}
+
+function applyWishCardStatus(card, status) {
+  const next = status === 'fulfilled' ? 'fulfilled' : 'active';
+  card.dataset.status = next;
+  const stateEl = card.querySelector('.wish-card-state');
+  if (stateEl) stateEl.textContent = wishCardStatusLabel(next);
+  const hint = card.querySelector('.wish-card-hint');
+  if (hint) hint.textContent = next === 'fulfilled' ? '愿望已标记完成' : '愿望已放回池中';
+  card.querySelectorAll('[data-wish-action]').forEach(btn => {
+    const action = btn.dataset.wishAction;
+    btn.disabled = (action === next);
+  });
+}
+
+async function setWishCardStatus(btn, wishId, status) {
+  const card = btn?.closest('.wish-fulfill-card');
+  if (!wishId || !card) return;
+  if (status === 'active') {
+    const hint = card.querySelector('.wish-card-hint');
+    if (hint) hint.textContent = card.dataset.status === 'fulfilled' ? '愿望已经完成，记录保持不变' : '愿望还在池中';
+    return;
+  }
+  const buttons = card.querySelectorAll('[data-wish-action]');
+  buttons.forEach(item => { item.disabled = true; });
+  const hint = card.querySelector('.wish-card-hint');
+  if (hint) hint.textContent = '更新中...';
+  try {
+    const res = await fetch(`/api/wishes/${encodeURIComponent(wishId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error('request failed');
+    const updated = await res.json();
+    document.querySelectorAll('.wish-fulfill-card').forEach(item => {
+      if (item.dataset.wishId === wishId) applyWishCardStatus(item, updated.status || status);
+    });
+  } catch (e) {
+    if (hint) hint.textContent = '更新失败，稍后再试';
+    buttons.forEach(item => { item.disabled = false; });
+  }
+}
+
+function buildWishFulfillmentCard(item) {
+  const wishId = String(item.wish_id || '');
+  const status = item.status === 'fulfilled' ? 'fulfilled' : 'active';
+  const idArg = escJsSingle(wishId);
+  const activeDisabled = '';
+  const fulfilledDisabled = status === 'fulfilled' ? ' disabled' : '';
+  const authorName = escHtml(item.author_name || '许愿者');
+  const content = escHtml(item.content || stripWishFulfillmentMarker(item.message || ''));
+  return `<div class="wish-fulfill-card" data-wish-id="${escHtml(wishId)}" data-status="${status}">
+    <div class="wish-card-head">
+      <span>许愿池愿望</span>
+      <span class="wish-card-state">${wishCardStatusLabel(status)}</span>
+    </div>
+    <div class="wish-card-from">来自【${authorName}】</div>
+    <div class="wish-card-content">${content}</div>
+    <div class="wish-card-actions">
+      <button type="button" data-wish-action="active" onclick="setWishCardStatus(this,'${idArg}','active')"${activeDisabled}>放回池中</button>
+      <button type="button" data-wish-action="fulfilled" onclick="setWishCardStatus(this,'${idArg}','fulfilled')"${fulfilledDisabled}>已完成</button>
+    </div>
+    <div class="wish-card-hint"></div>
+  </div>`;
+}
+
+const generatedSongPlayerStore = {};
+let generatedSongPlayerSeq = 0;
+let generatedSongAudio = null;
+let generatedSongProgressFrame = null;
+
+function registerGeneratedSongItem(item) {
+  const key = `song_${Date.now()}_${generatedSongPlayerSeq++}`;
+  generatedSongPlayerStore[key] = item || {};
+  return key;
+}
+
+function extractGeneratedSongLyrics(item) {
+  const direct = (item && item.lyrics) ? String(item.lyrics).trim() : '';
+  if (direct) return direct;
+  const prompt = (item && item.prompt) ? String(item.prompt) : '';
+  const match = prompt.match(/^\s*Lyrics\s*:\s*([\s\S]+)$/im);
+  if (match && match[1].trim()) return match[1].trim();
+  const desc = (item && item.description) ? String(item.description).trim() : '';
+  return desc || '';
+}
+
+function formatGeneratedSongTime(seconds) {
+  const sec = Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function closeGeneratedSongPlayer() {
+  if (generatedSongProgressFrame) {
+    cancelAnimationFrame(generatedSongProgressFrame);
+    generatedSongProgressFrame = null;
+  }
+  if (generatedSongAudio) {
+    generatedSongAudio.pause();
+    generatedSongAudio.src = '';
+    generatedSongAudio = null;
+  }
+  const overlay = document.getElementById('generatedSongPlayerOverlay');
+  if (overlay) overlay.remove();
+}
+
+function openGeneratedSongPlayer(key) {
+  const item = generatedSongPlayerStore[key];
+  if (!item || !item.url) return;
+  closeGeneratedSongPlayer();
+
+  const title = item.title || 'AI 生成歌曲';
+  const model = item.model || 'lyria-3-pro-preview';
+  const lyrics = extractGeneratedSongLyrics(item);
+  const overlay = document.createElement('div');
+  overlay.id = 'generatedSongPlayerOverlay';
+  overlay.className = 'song-player-overlay';
+  overlay.innerHTML = `
+    <div class="song-player-sheet" role="dialog" aria-modal="true" aria-label="歌曲播放器">
+      <button class="song-player-close" type="button" aria-label="关闭">×</button>
+      <div class="song-player-head">
+        <div class="song-player-cover" aria-hidden="true"><span></span></div>
+        <div class="song-player-info">
+          <div class="song-player-kicker">Generated Song</div>
+          <div class="song-player-title">${escHtml(title)}</div>
+          <div class="song-player-meta">${escHtml(model)}</div>
+        </div>
+      </div>
+      <div class="song-player-controls">
+        <button class="song-player-play" type="button">播放</button>
+        <div class="song-player-progress-wrap">
+          <input class="song-player-progress" type="range" min="0" max="1000" value="0" aria-label="播放进度">
+          <div class="song-player-time"><span class="song-player-current">0:00</span><span class="song-player-duration">0:00</span></div>
+        </div>
+      </div>
+      <div class="song-player-lyrics-title">歌词</div>
+      <div class="song-player-lyrics">${lyrics ? escHtml(lyrics) : '<span class="song-player-empty">暂无歌词</span>'}</div>
+    </div>
+  `;
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeGeneratedSongPlayer();
+  });
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => overlay.classList.add('active'));
+
+  const audio = new Audio(item.url);
+  generatedSongAudio = audio;
+  const playBtn = overlay.querySelector('.song-player-play');
+  const progress = overlay.querySelector('.song-player-progress');
+  const currentEl = overlay.querySelector('.song-player-current');
+  const durationEl = overlay.querySelector('.song-player-duration');
+  const cover = overlay.querySelector('.song-player-cover');
+
+  function setProgressValue(pct) {
+    const safePct = Math.min(1000, Math.max(0, pct || 0));
+    progress.value = String(safePct);
+    progress.style.setProperty('--song-progress', `${safePct / 10}%`);
+  }
+
+  function updateProgress() {
+    const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+    const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    const pct = duration > 0 ? Math.round((current / duration) * 1000) : 0;
+    setProgressValue(pct);
+    durationEl.textContent = formatGeneratedSongTime(duration);
+    currentEl.textContent = formatGeneratedSongTime(current);
+  }
+
+  function stopProgressLoop() {
+    if (generatedSongProgressFrame) {
+      cancelAnimationFrame(generatedSongProgressFrame);
+      generatedSongProgressFrame = null;
+    }
+  }
+
+  function startProgressLoop() {
+    stopProgressLoop();
+    const tick = () => {
+      updateProgress();
+      if (generatedSongAudio === audio && !audio.paused && !audio.ended) {
+        generatedSongProgressFrame = requestAnimationFrame(tick);
+      }
+    };
+    generatedSongProgressFrame = requestAnimationFrame(tick);
+  }
+
+  overlay.querySelector('.song-player-close')?.addEventListener('click', closeGeneratedSongPlayer);
+  playBtn.addEventListener('click', async () => {
+    if (audio.paused) {
+      try { await audio.play(); } catch(e) {}
+    } else {
+      audio.pause();
+    }
+  });
+  progress.addEventListener('input', () => {
+    const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+    if (!duration) return;
+    audio.currentTime = (Number(progress.value) / 1000) * duration;
+    updateProgress();
+  });
+  audio.addEventListener('play', () => {
+    playBtn.textContent = '暂停';
+    cover.classList.add('playing');
+    startProgressLoop();
+  });
+  audio.addEventListener('pause', () => {
+    playBtn.textContent = '播放';
+    cover.classList.remove('playing');
+    stopProgressLoop();
+    updateProgress();
+  });
+  audio.addEventListener('ended', () => {
+    playBtn.textContent = '播放';
+    cover.classList.remove('playing');
+    stopProgressLoop();
+    updateProgress();
+  });
+  audio.addEventListener('loadedmetadata', updateProgress);
+  audio.addEventListener('durationchange', updateProgress);
+  audio.addEventListener('timeupdate', updateProgress);
+  audio.addEventListener('seeking', updateProgress);
+  audio.addEventListener('seeked', updateProgress);
+  updateProgress();
+}
+
+function buildGeneratedSongCard(item) {
+  const key = registerGeneratedSongItem(item);
+  const keyArg = escJsSingle(key);
+  const url = escHtml(item.url || '');
+  const title = escHtml(item.title || 'AI 生成歌曲');
+  const model = escHtml(item.model || 'lyria-3-pro-preview');
+  const mime = escHtml(item.mime_type || 'audio/mpeg');
+  return `<div class="generated-song-card" data-song-key="${escHtml(key)}">
+    <div class="generated-song-main">
+      <div class="generated-song-icon" aria-hidden="true"><span></span></div>
+      <div class="generated-song-copy">
+        <div class="generated-song-title">${title}</div>
+        <div class="generated-song-meta">${model}</div>
+      </div>
+    </div>
+    <div class="generated-song-actions">
+      <button type="button" class="generated-song-open" onclick="openGeneratedSongPlayer('${keyArg}')">打开播放器</button>
+      <audio controls preload="metadata" src="${url}" type="${mime}"></audio>
+    </div>
+  </div>`;
+}
+
 function renderAttachments(atts) {
   if (!atts || !atts.length) return '';
   let mediaHtml = '';
   let capsuleHtml = '';
   let voiceHtml = '';
+  let wishHtml = '';
   const aiName = worldBook.ai_name || 'AI';
   atts.forEach(item => {
     if (typeof item === 'object' && item.type === 'luckin_payment') {
       mediaHtml += buildLuckinPaymentCard(item);
+    } else if (typeof item === 'object' && item.type === 'wish_fulfillment') {
+      wishHtml += buildWishFulfillmentCard(item);
     } else if (typeof item === 'object' && item.type === 'music') {
       capsuleHtml += `<div class="music-capsule" onclick="openInNetease(${item.id})">🎵 ${escHtml(aiName)}给你点播歌曲《${escHtml(item.name)}》</div>`;
+    } else if (typeof item === 'object' && item.type === 'generated_song') {
+      mediaHtml += buildGeneratedSongCard(item);
     } else if (typeof item === 'object' && item.type === 'voice') {
       const dur = item.duration || 0;
       const durText = dur >= 60 ? `${Math.floor(dur/60)}:${String(Math.floor(dur%60)).padStart(2,'0')}` : `${Math.floor(dur)}"`;
@@ -2991,11 +3438,13 @@ function renderAttachments(atts) {
     } else {
       const url = typeof item === 'string' ? item : (item && item.url ? item.url : '');
       if (/\.(mp4|webm|mov)$/i.test(url)) mediaHtml += `<video src="${escHtml(url)}" controls preload="metadata"></video>`;
+      else if (/\.(mp3|wav|m4a|aac|ogg)$/i.test(url)) mediaHtml += `<audio src="${escHtml(url)}" controls preload="metadata"></audio>`;
       else if (url) mediaHtml += `<img src="${escHtml(url)}" onclick="openImageViewer(this.src)">`;
     }
   });
   let html = '';
   if (voiceHtml) html += voiceHtml;
+  if (wishHtml) html += wishHtml;
   if (mediaHtml) html += '<div class="msg-media">' + mediaHtml + '</div>';
   if (capsuleHtml) html += capsuleHtml;
   return html;
@@ -3567,14 +4016,6 @@ function toggleMsgMenu(id) {
   closeMsgMenus();
   if (!wasOpen && menu) menu.classList.add('show');
 }
-function showMsgMenuForRow(row) {
-  const id = row?.getAttribute?.('data-msg-id');
-  if (!id) return;
-  const menu = document.getElementById('menu_' + id);
-  if (!menu) return;
-  closeMsgMenus();
-  menu.classList.add('show');
-}
 function closeMsgMenus() {
   document.querySelectorAll('.msg-menu.show').forEach(m => m.classList.remove('show'));
 }
@@ -3583,63 +4024,8 @@ document.addEventListener('click', e => {
   if (e.target.closest?.('.msg-feedback-popover, .msg-feedback-btn')) return;
   closeMsgFeedbackPopover();
 });
-function msgMenuRowFromTarget(target) {
-  if (!target || target.closest?.('.msg-menu, .msg-feedback-popover, button, input, textarea, a')) return null;
-  return target.closest?.('.msg-row[data-msg-id]');
-}
-$("messages").addEventListener('contextmenu', e => {
-  const row = msgMenuRowFromTarget(e.target);
-  if (!row || !document.getElementById('menu_' + row.getAttribute('data-msg-id'))) return;
-  e.preventDefault();
-  e.stopPropagation();
-  showMsgMenuForRow(row);
-});
-
-let msgLongPressTimer = null;
-let msgLongPressPoint = null;
-let msgLongPressOpened = false;
-
-function clearMsgLongPress() {
-  if (msgLongPressTimer) clearTimeout(msgLongPressTimer);
-  msgLongPressTimer = null;
-  msgLongPressPoint = null;
-}
-
-$("messages").addEventListener('pointerdown', e => {
-  if (e.pointerType === 'mouse' && e.button !== 0) return;
-  const row = msgMenuRowFromTarget(e.target);
-  if (!row || !document.getElementById('menu_' + row.getAttribute('data-msg-id'))) return;
-  msgLongPressOpened = false;
-  msgLongPressPoint = { x: e.clientX, y: e.clientY, row };
-  msgLongPressTimer = setTimeout(() => {
-    msgLongPressOpened = true;
-    showMsgMenuForRow(row);
-    try { navigator.vibrate?.(12); } catch {}
-  }, 520);
-});
-
-$("messages").addEventListener('pointermove', e => {
-  if (!msgLongPressPoint) return;
-  const dx = Math.abs(e.clientX - msgLongPressPoint.x);
-  const dy = Math.abs(e.clientY - msgLongPressPoint.y);
-  if (dx > 8 || dy > 8) clearMsgLongPress();
-});
-
-['pointerup', 'pointercancel', 'pointerleave'].forEach(type => {
-  $("messages").addEventListener(type, e => {
-    if (msgLongPressOpened) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    clearMsgLongPress();
-  });
-});
 
 document.addEventListener('click', () => {
-  if (msgLongPressOpened) {
-    msgLongPressOpened = false;
-    return;
-  }
   closeMsgMenus();
 });
 
@@ -4198,7 +4584,8 @@ async function _receiveGift(giftId) {
 
 // ── 子页面 iframe 浮层逻辑 ──
 let currentSubPage = null;
-const _subPageNames = {'/':'主页','/settings':'设置','/memory':'记忆库','/diary':'日记本','/worldbook':'世界书','/schedule':'日程','/camera':'摄像头','/monitor-logs':'监控日志','/location':'定位','/heart-whispers':'心语'};
+window.getCurrentConversationId = function() { return currentConvId || ''; };
+const _subPageNames = {'/':'主页','/settings':'设置','/memory':'记忆库','/diary':'日记本','/worldbook':'世界书','/schedule':'日程','/camera':'摄像头','/monitor-logs':'监控日志','/location':'定位','/heart-whispers':'心语','/wishes':'许愿池'};
 function parseSubPageColor(value) {
   if (!value || value === 'transparent') return null;
   const hexMatch = value.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
@@ -4272,7 +4659,7 @@ function syncSubPageMode(url) {
     try { return new URL(url, location.origin).pathname; } catch(e) { return url || ''; }
   })();
   const isHome = path === '/';
-  const isImmersive = path === '/chatroom';
+  const isImmersive = path === '/wishes';
   const ov = $('subPageOverlay');
   ov.classList.toggle('home-subpage', isHome);
   ov.classList.toggle('immersive-subpage', isImmersive);

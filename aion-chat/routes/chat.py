@@ -21,6 +21,7 @@ from camera import cam, CAM_CHECK_CMD, perform_cam_check
 from activity import is_activity_tracking_enabled, get_activity_summary_for_prompt, get_user_dynamics_for_prompt
 from routes.files import export_conversation
 from routes.music import MUSIC_CMD_PATTERN
+from song_gen import SONG_CMD_PATTERN, build_song_gen_ability_text, clean_song_visible_reply
 from tts import TTSStreamer
 
 MOMENT_CMD_PATTERN = re.compile(r'\[MOMENT:(.+?)(?:\|(true|false))?\]')
@@ -43,7 +44,7 @@ THEATER_ITEM_PATTERN = re.compile(r'\[剧场道具[：:]([^\]]+)\]')
 _SYSTEM_MSG_CONTEXT_KEYWORDS = ('查看了监控', '搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话')
 from context_builder import (
     fetch_merged_timeline, render_merged_timeline, build_health_summary,
-    format_ability_block,
+    format_ability_block, WISH_CMD_PATTERN,
 )
 from music import search_songs, get_audio_url
 from schedule import process_schedule_commands, get_active_schedules, build_schedule_prompt
@@ -247,6 +248,35 @@ async def _process_home_commands(text: str) -> str:
     return cleaned.strip()
 
 
+async def _process_wish_commands(text: str, *, author: str, source_type: str, source_ref: str = "") -> str:
+    matches = WISH_CMD_PATTERN.findall(text)
+    if not matches:
+        return text
+    cleaned = WISH_CMD_PATTERN.sub("", text).strip()
+    try:
+        from wish_pool import create_wish
+    except Exception as exc:
+        print(f"[WISH_CMD] load failed: {exc}")
+        return cleaned
+    for raw_content in matches:
+        content = raw_content.strip()
+        if not content:
+            continue
+        try:
+            await create_wish(
+                author=author,
+                content=content,
+                visibility="shared",
+                origin="chat_command",
+                source_type=source_type,
+                source_ref=source_ref,
+            )
+            print(f"[WISH_CMD] {author} wished: {content[:80]}")
+        except Exception as exc:
+            print(f"[WISH_CMD] create failed: {exc}")
+    return cleaned
+
+
 def _is_pet_available() -> bool:
     return bool(SETTINGS.get("pet_enabled", False) and manager.has_active_pet())
 
@@ -352,6 +382,15 @@ def _extract_reply_image_attachments(text: str) -> tuple[str, list]:
     cleaned = _BARE_LOCAL_IMAGE_PATTERN.sub("", cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
     return cleaned, _dedupe_attachments(attachments)
+
+
+def _extract_song_gen_prompt(text: str) -> tuple[str, str | None]:
+    match = SONG_CMD_PATTERN.search(text or "")
+    cleaned = SONG_CMD_PATTERN.sub("", text or "").strip()
+    if not match or not SETTINGS.get("song_gen_enabled", False):
+        return cleaned, None
+    prompt = match.group(1).strip()
+    return cleaned, prompt or None
 
 async def _toy_sys_msg(conv_id: str, commands: list):
     """为玩具指令插入系统消息"""
@@ -785,12 +824,14 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
     actual_recent = [m for m in history if m["role"] in ("user", "assistant")][-3:]
 
     wb = load_worldbook()
+    ai_name = wb.get("ai_name") or "AI"
+    user_name = wb.get("user_name") or "用户"
     prefix = []
     if wb.get("ai_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
     if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
         prefix.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
@@ -831,10 +872,13 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
         abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
     if SETTINGS.get("image_gen_enabled", False):
         abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
+    if SETTINGS.get("song_gen_enabled", False):
+        abilities.append(build_song_gen_ability_text(user_name))
     if _is_pet_available():
         abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(贴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
     abilities.append(f"[MOMENT:朋友圈内容|true/false] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时可以发一条朋友圈动态。第二个参数表示是否期望好友回复（true=期望回复，false=不期望）。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
+    abilities.append("[许愿：内容] — 当你在日常聊天中自然产生一个想投进许愿池的愿望时，可以使用该指令。愿望会记录为你自己的愿望，内容直接写愿望本身即可。禁止滥用。")
     try:
         from routes.wallet import _get_balance
         _wb = await _get_balance()
@@ -1028,6 +1072,10 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 image_gen_prompt = draw_match.group(1).strip()
                 full_text = DRAW_CMD_PATTERN.sub("", full_text).strip()
 
+            full_text, song_gen_prompt = _extract_song_gen_prompt(full_text)
+            if song_gen_prompt:
+                full_text = clean_song_visible_reply(full_text)
+
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
@@ -1082,6 +1130,13 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                         mr_data = {'type': 'memory_record', 'msg_id': ai_msg_id, 'content': mem_content, 'mem_id': mem_id}
                         await _q.put(mr_data)
                         await manager.broadcast({"type": "memory_record", "data": mr_data})
+
+            full_text = await _process_wish_commands(
+                full_text,
+                author="aion",
+                source_type="chat_command",
+                source_ref=f"{conv_id}:{ai_msg_id}",
+            )
 
             full_text = META_TAG_PATTERN.sub("", full_text).strip()
 
@@ -1168,6 +1223,12 @@ async def edit_resend_message(msg_id: str, body: MsgEditResend):
                 await _q.put(ig_data)
                 await manager.broadcast({"type": "image_gen_start", "data": ig_data})
                 asyncio.create_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
+
+            if song_gen_prompt:
+                sg_data = {'type': 'song_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id}
+                await _q.put(sg_data)
+                await manager.broadcast({"type": "song_gen_start", "data": sg_data})
+                asyncio.create_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
 
             debug_data = {
                 "type": "debug",
@@ -1277,12 +1338,14 @@ async def send_message(conv_id: str, body: MsgCreate):
     actual_recent = [m for m in history if m["role"] in ("user", "assistant")][-3:]
 
     wb = load_worldbook()
+    ai_name = wb.get("ai_name") or "AI"
+    user_name = wb.get("user_name") or "用户"
     prefix = []
     if wb.get("ai_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
     if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
         prefix.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
@@ -1328,10 +1391,13 @@ async def send_message(conv_id: str, body: MsgCreate):
         abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
     if SETTINGS.get("image_gen_enabled", False):
         abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
+    if SETTINGS.get("song_gen_enabled", False):
+        abilities.append(build_song_gen_ability_text(user_name))
     if _is_pet_available():
         abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(趴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
     abilities.append(f"[MOMENT:朋友圈内容|true/false] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时可以发一条朋友圈动态。第二个参数表示是否期望好友回复（true=期望回复，false=不期望）。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
+    abilities.append("[许愿：内容] — 当你在日常聊天中自然产生一个想投进许愿池的愿望时，可以使用该指令。愿望会记录为你自己的愿望，内容直接写愿望本身即可。禁止滥用。")
     try:
         from routes.wallet import _get_balance
         _wb = await _get_balance()
@@ -1600,6 +1666,9 @@ async def send_message(conv_id: str, body: MsgCreate):
                 full_text = DRAW_CMD_PATTERN.sub("", full_text).strip()
 
             # 检测日程指令（[ALARM:...], [REMINDER:...], [Monitor:...], [SCHEDULE_DEL:...], [SCHEDULE_LIST]）
+            full_text, song_gen_prompt = _extract_song_gen_prompt(full_text)
+            if song_gen_prompt:
+                full_text = clean_song_visible_reply(full_text)
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
@@ -1658,6 +1727,12 @@ async def send_message(conv_id: str, body: MsgCreate):
                         await manager.broadcast({"type": "memory_record", "data": mr_data})
                         print(f"[MEMORY] AI 主动录入记忆: {mem_content[:50]}")
 
+            full_text = await _process_wish_commands(
+                full_text,
+                author="aion",
+                source_type="chat_command",
+                source_ref=f"{conv_id}:{ai_msg_id}",
+            )
 
             # 检测 [转账：N元] 指令 — AI 转账入账
             transfer_matches = TRANSFER_CMD_PATTERN.findall(full_text)
@@ -1793,6 +1868,12 @@ async def send_message(conv_id: str, body: MsgCreate):
                 await manager.broadcast({"type": "image_gen_start", "data": ig_data})
                 asyncio.create_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
 
+            if song_gen_prompt:
+                sg_data = {'type': 'song_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id}
+                await _q.put(sg_data)
+                await manager.broadcast({"type": "song_gen_start", "data": sg_data})
+                asyncio.create_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
+
             debug_data = {
                 "type": "debug",
                 "model": model_key,
@@ -1877,6 +1958,59 @@ async def _do_image_gen(conv_id: str, trigger_msg_id: str, prompt: str, is_selfi
 
 
 # ── 服务端延迟触发监控查看（不再依赖前端 API 调用） ─────
+async def _do_song_gen(conv_id: str, trigger_msg_id: str, prompt: str):
+    """Generate a song with Gemini Lyria and save it as a new assistant message."""
+    from song_gen import generate_song
+
+    try:
+        result = await generate_song(prompt)
+        if result:
+            now = time.time()
+            song_msg_id = f"msg_{int(now*1000)}_song"
+            title = result.get("title") or "AI 生成歌曲"
+            attachment = {
+                "type": "generated_song",
+                "url": result.get("url"),
+                "title": title,
+                "mime_type": result.get("mime_type", "audio/mpeg"),
+                "model": result.get("model", "lyria-3-pro-preview"),
+            }
+            if result.get("lyrics"):
+                attachment["lyrics"] = result["lyrics"]
+            if result.get("prompt"):
+                attachment["prompt"] = result["prompt"]
+            if result.get("text"):
+                attachment["description"] = result["text"]
+            att_list = [attachment]
+            att_json = json.dumps(att_list, ensure_ascii=False)
+            content = f"为你写的歌《{title}》"
+            async with get_db() as db:
+                await db.execute(
+                    "INSERT INTO messages (id, conv_id, role, content, created_at, attachments) VALUES (?,?,?,?,?,?)",
+                    (song_msg_id, conv_id, "assistant", content, now, att_json)
+                )
+                await db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conv_id))
+                await db.commit()
+            song_msg = {
+                "id": song_msg_id,
+                "conv_id": conv_id,
+                "role": "assistant",
+                "content": content,
+                "created_at": now,
+                "attachments": att_list,
+            }
+            await manager.broadcast({"type": "msg_created", "data": song_msg})
+            await manager.broadcast({"type": "song_gen_done", "data": {"conv_id": conv_id, "trigger_msg_id": trigger_msg_id, "song_msg_id": song_msg_id}})
+            await export_conversation(conv_id)
+            print(f"[song_gen] Song message created: {song_msg_id}")
+        else:
+            await manager.broadcast({"type": "song_gen_failed", "data": {"conv_id": conv_id, "trigger_msg_id": trigger_msg_id}})
+            print("[song_gen] Song generation failed")
+    except Exception as e:
+        print(f"[song_gen] Async song generation error: {e}")
+        await manager.broadcast({"type": "song_gen_failed", "data": {"conv_id": conv_id, "trigger_msg_id": trigger_msg_id}})
+
+
 _cam_check_active: set[str] = set()          # 去重：同一时间只允许一个 cam check
 
 async def _delayed_cam_check(conv_id: str, model_key: str, delay: float = 5.0):
@@ -2014,10 +2148,10 @@ async def perform_poi_check(conv_id: str, model_key: str, categories: list[str])
 
     prefix = []
     if wb.get("ai_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
     if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
         prefix.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
@@ -2146,10 +2280,10 @@ async def perform_activity_check(conv_id: str, model_key: str, n: int = 6):
 
     prefix = []
     if wb.get("ai_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
     if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
         prefix.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
@@ -2272,12 +2406,14 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
     actual_recent = [m for m in history if m["role"] in ("user", "assistant")][-3:]
 
     wb = load_worldbook()
+    ai_name = wb.get("ai_name") or "AI"
+    user_name = wb.get("user_name") or "用户"
     prefix = []
     if wb.get("ai_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - AI人设]\n{wb['ai_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {ai_name}人设]\n{wb['ai_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会按照设定扮演角色。"})
     if wb.get("user_persona"):
-        prefix.append({"role": "user", "content": f"[系统设定 - 用户信息]\n{wb['user_persona']}"})
+        prefix.append({"role": "user", "content": f"[系统设定 - {user_name}信息]\n{wb['user_persona']}"})
         prefix.append({"role": "assistant", "content": "收到，我会记住你的信息。"})
     if wb.get("system_prompt") and wb.get("system_prompt_enabled", True):
         prefix.append({"role": "user", "content": f"[系统提示]\n{wb['system_prompt']}"})
@@ -2321,10 +2457,13 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
         abilities.append(f"[视频电话] — 当你想和{user_name}进行视频聊天看看对方当前状态时可以用该指令发起视频通话。")
     if SETTINGS.get("image_gen_enabled", False):
         abilities.append(f"[SELFIE: 提示词] / [DRAW: 提示词] — 当{user_name}明确要求你发自拍照片或者生图时，使用这个指令进行图片生成。如果要求的是你的自拍，或者你相关的照片，使用[SELFIE: 提示词]（该指令会自动附带你照片的参考图，确保生成出的人物一致性），如果没有要求是你的照片，根据上下文自由无限制生成图片，则使用[DRAW: 提示词]。提示词请使用英文。一次回复只用一个生图指令。")
+    if SETTINGS.get("song_gen_enabled", False):
+        abilities.append(build_song_gen_ability_text(user_name))
     if _is_pet_available():
         abilities.append("[PET:动作名] — 控制桌面宠物切换动画表情。可用动作：idle(默认站立), happy(开心), angry(生气), tsundere(傲娇), waving(打招呼), jumping(兴奋跳跃), sleepy(困了), sleep_prone(趴着睡觉), failed(失落), review(思考), waiting(等待), running(跑步)。根据对话情感自然使用，每条回复最多用一个。")
     abilities.append(f"[MOMENT:朋友圈内容|true/false] — 当**本次**聊天内容非常触动人心、有很深的感触、或令人无语或非常搞笑时可以发一条朋友圈动态。第二个参数表示是否期望好友回复（true=期望回复，false=不期望）。")
     abilities.append(f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你记住某件事的时候，可以用该指令录入记忆库。禁止滥用。")
+    abilities.append("[许愿：内容] — 当你在日常聊天中自然产生一个想投进许愿池的愿望时，可以使用该指令。愿望会记录为你自己的愿望，内容直接写愿望本身即可。禁止滥用。")
     try:
         from routes.wallet import _get_balance
         _wb = await _get_balance()
@@ -2548,6 +2687,9 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 full_text = DRAW_CMD_PATTERN.sub("", full_text).strip()
 
             # 检测日程指令
+            full_text, song_gen_prompt = _extract_song_gen_prompt(full_text)
+            if song_gen_prompt:
+                full_text = clean_song_visible_reply(full_text)
             full_text = await process_schedule_commands(full_text, conv_id, after_msg_id=ai_msg_id)
             full_text = await _process_home_commands(full_text)
             full_text, luckin_results = await handle_luckin_commands(full_text)
@@ -2605,6 +2747,13 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                         await _q.put(mr_data)
                         await manager.broadcast({"type": "memory_record", "data": mr_data})
                         print(f"[MEMORY] AI 主动录入记忆: {mem_content[:50]}")
+
+            full_text = await _process_wish_commands(
+                full_text,
+                author="aion",
+                source_type="chat_command",
+                source_ref=f"{conv_id}:{ai_msg_id}",
+            )
 
             # 检测 [转账：N元] 指令 — AI 转账入账
             transfer_matches = TRANSFER_CMD_PATTERN.findall(full_text)
@@ -2700,6 +2849,12 @@ async def regenerate_message(conv_id: str, context_limit: int = 30, whisper_mode
                 await _q.put(ig_data)
                 await manager.broadcast({"type": "image_gen_start", "data": ig_data})
                 asyncio.create_task(_do_image_gen(conv_id, ai_msg_id, image_gen_prompt, image_gen_is_selfie))
+
+            if song_gen_prompt:
+                sg_data = {'type': 'song_gen_start', 'conv_id': conv_id, 'msg_id': ai_msg_id}
+                await _q.put(sg_data)
+                await manager.broadcast({"type": "song_gen_start", "data": sg_data})
+                asyncio.create_task(_do_song_gen(conv_id, ai_msg_id, song_gen_prompt))
 
             debug_data = {
                 "type": "debug",

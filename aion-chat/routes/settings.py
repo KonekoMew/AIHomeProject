@@ -166,6 +166,20 @@ async def update_image_gen_setting(body: ImageGenToggle):
     return {"ok": True, "image_gen_enabled": body.enabled}
 
 # ── CLI 工具调用开关（Gemini CLI / Antigravity CLI） ─────────────────
+# ── AI song generation toggle ─────────────────────────────────
+@router.get("/api/settings/song-gen")
+async def get_song_gen_setting():
+    return {"song_gen_enabled": SETTINGS.get("song_gen_enabled", False)}
+
+class SongGenToggle(BaseModel):
+    enabled: bool
+
+@router.put("/api/settings/song-gen")
+async def update_song_gen_setting(body: SongGenToggle):
+    SETTINGS["song_gen_enabled"] = body.enabled
+    save_settings(SETTINGS)
+    return {"ok": True, "song_gen_enabled": body.enabled}
+
 @router.get("/api/settings/gemini-cli-tools")
 async def get_gemini_cli_tools_setting():
     return {"gemini_cli_tools_enabled": SETTINGS.get("gemini_cli_tools_enabled", False)}

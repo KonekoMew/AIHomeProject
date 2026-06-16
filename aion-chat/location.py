@@ -699,9 +699,9 @@ async def _notify_sentinel(old_state: str, new_state: str, status: dict, event_d
 
 请判断是否需要唤醒Core核心模型主动联系{user_name}。
 判断依据：
-- 如果聊天上下文或状态中已经提到了出门/回家的事，{ai_name}已经知道了，则不需要唤醒
+- 如果聊天上下文或状态中已经提到了出门的事，{ai_name}已经知道了，则不需要唤醒
 - 如果{user_name}出门了但对话中没有提到这件事（{ai_name}还不知道），则需要唤醒
-- 如果{user_name}回家了而之前状态显示在外面，且{ai_name}还不知道回家的事，则需要唤醒
+- 如果{user_name}回家了，应主动问候，并欢迎回家。
 - 其他你认为需要主动联系的情况
 
 请严格按照以下JSON格式回复，不要包含其他内容：

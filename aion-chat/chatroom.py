@@ -32,6 +32,12 @@ _DEFAULT_CONFIG = {
     "reply_order": "random",
     "connor_model": "Codex",
     "aion_model": "",
+    "ambient_voice_enabled": False,
+    "ambient_voice_wake_word": "现在立刻唤醒",
+    "ambient_voice_stop_word": "结束立刻唤醒",
+    "ambient_voice_min_chars": 500,
+    "ambient_voice_interval_seconds": 120,
+    "ambient_voice_cooldown_seconds": 180,
 }
 
 
@@ -597,7 +603,7 @@ async def save_chatroom_memory(
     return mem_id
 
 
-async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
+async def digest_chatroom(room_id: str = None, model_key: str = None, allow_ai_wishes: bool = False) -> dict:
     """对 Connor 的所有消息（1v1 + 群聊）统一进行总结，通过 Codex 生成记忆。
     支持分组（每 30 条一组），总结后生成日记 + 可选朋友圈 + 礼物判断。
     room_id 参数保留兼容性但不再用于限定数据源。"""
@@ -897,11 +903,49 @@ async def digest_chatroom(room_id: str = None, model_key: str = None) -> dict:
         except Exception as e:
             print(f"[chatroom_digest] 礼物判断失败: {e}")
 
+    ai_wish_created = False
+    if allow_ai_wishes and total_new > 0 and all_summaries:
+        try:
+            wish_context_lines = []
+            for m in msgs[-30:]:
+                content = (m.get("content") or "").strip()
+                if not content:
+                    continue
+                source_label = "群聊" if m.get("_source") == "group" else "私聊"
+                ts = time.strftime("%m-%d %H:%M", time.localtime(m["created_at"]))
+                name = {"user": user_name, "aion": ai_name, "connor": connor_name}.get(m["sender"], m["sender"])
+                wish_context_lines.append(f"[{ts}][{source_label}] {name}: {content[:300]}")
+            context_text = "\n".join(wish_context_lines)
+
+            async def _generate_wish_text(prompt: str):
+                return await simple_connor_cli_call(prompt)
+
+            from wish_pool import maybe_create_ai_digest_wish
+
+            wish_result = await maybe_create_ai_digest_wish(
+                actor="connor",
+                actor_name=connor_name,
+                user_name=user_name,
+                summaries=all_summaries,
+                context_text=context_text,
+                persona_block=persona_block,
+                source_ref=target_room_id or anchor_key,
+                source_start_ts=msgs[0]["created_at"],
+                source_end_ts=msgs[-1]["created_at"],
+                generate_text=_generate_wish_text,
+            )
+            ai_wish_created = bool(wish_result.get("created"))
+            if ai_wish_created:
+                print(f"[chatroom_digest] AI wish created: {wish_result.get('wish', {}).get('id', '')}")
+        except Exception as e:
+            print(f"[chatroom_digest] wish decision failed: {e}")
+
     return {
         "ok": True,
         "message": f"总结完成：处理了 {len(msgs)} 条消息（{len(groups)} 组），生成了 {total_new} 条新记忆",
         "new_memories_count": total_new,
         "processed_messages": len(msgs),
+        "ai_wish_created": ai_wish_created,
     }
 
 
@@ -1221,7 +1265,7 @@ async def _connor_1v1_auto_digest_loop():
             if elapsed < 30 * 60:
                 continue
             print(f"[chatroom_auto_digest] Connor 相关聊天已 {elapsed/60:.0f} 分钟无新消息，开始自动总结")
-            result = await digest_chatroom()
+            result = await digest_chatroom(allow_ai_wishes=True)
             print(f"[chatroom_auto_digest] {result.get('message', '')}")
             # 总结完成后解除 armed，避免没有新消息时重复总结
             _connor_digest_armed = False

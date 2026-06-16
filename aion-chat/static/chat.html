@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#ff8359">
-<link rel="stylesheet" href="/static/chat.css?v=theme-20260606b">
+<link rel="stylesheet" href="/static/chat.css?v=song-player-20260615c">
 </head>
 <body data-theme="dark">
 
@@ -225,6 +225,15 @@
       </div>
       <div class="cam-section">
         <div class="cam-toggle-row">
+          <span class="cam-toggle-label">允许 AI 生成歌曲</span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="songGenToggle" onchange="toggleSongGenEnabled()">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      <div class="cam-section">
+        <div class="cam-toggle-row">
           <span class="cam-toggle-label">允许 CLI 模型调用工具</span>
           <label class="toggle-switch">
             <input type="checkbox" id="geminiCliToolsToggle" onchange="toggleGeminiCliTools()">
@@ -277,7 +286,7 @@
 
   <iframe id="subPageFrame" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"></iframe>
 </div>
-<script src="/static/chat.js?v=system-order-20260608d"></script>
+<script src="/static/chat.js?v=song-player-20260615c"></script>
 
 <!-- ── 转账弹窗 ── -->
 <div class="transfer-dialog-overlay" id="transferDialogOverlay" onclick="closeTransferDialog()">

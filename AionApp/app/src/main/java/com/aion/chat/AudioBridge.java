@@ -12,7 +12,7 @@ import android.webkit.WebView;
  * 录音线程实时采集 PCM，通过 evaluateJavascript 推送给前端 JS
  *
  * 前端调用: window.AionAudio.start() / stop() / isRecording()
- * 前端接收: remoteVoice._onNativeChunk(base64)
+ * 前端接收: remoteVoice._onNativeChunk(base64) / _ambientNativeOnChunk(base64)
  */
 public class AudioBridge {
 
@@ -80,6 +80,7 @@ public class AudioBridge {
                             webView.evaluateJavascript(
                                     "typeof remoteVoice!=='undefined'&&remoteVoice._onNativeChunk('" + b64 + "');" +
                                     "typeof videoCall!=='undefined'&&videoCall._onNativeChunk&&videoCall._onNativeChunk('" + b64 + "');" +
+                                    "typeof _ambientNativeOnChunk==='function'&&_ambientNativeOnChunk('" + b64 + "');" +
                                     "typeof _voiceNativeOnChunk==='function'&&_voiceNativeOnChunk('" + b64 + "')",
                                     null);
                         }

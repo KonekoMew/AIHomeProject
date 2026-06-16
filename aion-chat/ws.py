@@ -2,7 +2,7 @@
 WebSocket 连接管理器
 """
 
-import json, logging
+import json, logging, time
 from fastapi import WebSocket
 
 log = logging.getLogger("ws")
@@ -11,7 +11,7 @@ log = logging.getLogger("ws")
 class ConnectionManager:
     def __init__(self):
         self.active: list[WebSocket] = []
-        self.tts_clients: dict[WebSocket, dict] = {}  # {ws: {"enabled": bool, "voice": str}}
+        self.tts_clients: dict[WebSocket, dict] = {}  # {ws: {"enabled": bool, "voice": str, "can_play": bool, "active_at": float}}
         self._tts_fallback: dict = {}  # {"enabled": bool, "voice": str} — 来自 HTTP 请求的备用 TTS 状态
         self.client_ids: dict[WebSocket, str] = {}     # {ws: client_id} — 客户端唯一标识
         self._last_sender_client_id: str | None = None  # 最后发消息的客户端 ID
@@ -78,9 +78,22 @@ class ConnectionManager:
         if self._last_sender_client_id:
             await self.send_to_client(self._last_sender_client_id, data)
 
-    def set_tts_state(self, ws: WebSocket, enabled: bool, voice: str = ""):
+    def set_tts_state(
+        self,
+        ws: WebSocket,
+        enabled: bool,
+        voice: str = "",
+        *,
+        can_play: bool = True,
+        active_at: float | None = None,
+    ):
         if enabled and voice:
-            self.tts_clients[ws] = {"enabled": True, "voice": voice}
+            self.tts_clients[ws] = {
+                "enabled": True,
+                "voice": voice,
+                "can_play": bool(can_play),
+                "active_at": active_at if active_at is not None else time.time(),
+            }
         else:
             self.tts_clients.pop(ws, None)
 
@@ -92,17 +105,48 @@ class ConnectionManager:
             self._tts_fallback = {}
 
     def any_tts_enabled(self) -> bool:
-        if any(c.get("enabled") for c in self.tts_clients.values()):
+        if any(c.get("enabled") and c.get("can_play", True) for c in self.tts_clients.values()):
             return True
         return bool(self._tts_fallback.get("enabled"))
 
     def get_tts_voice(self) -> str | None:
-        for c in self.tts_clients.values():
-            if c.get("enabled"):
+        for _, c in self._sorted_tts_clients():
+            if c.get("enabled") and c.get("can_play", True):
                 return c.get("voice")
         if self._tts_fallback.get("enabled"):
             return self._tts_fallback.get("voice")
         return None
+
+    def _sorted_tts_clients(self) -> list[tuple[WebSocket, dict]]:
+        return sorted(
+            list(self.tts_clients.items()),
+            key=lambda item: float(item[1].get("active_at") or 0),
+            reverse=True,
+        )
+
+    def _select_tts_client(self) -> tuple[WebSocket, dict] | None:
+        for ws, state in self._sorted_tts_clients():
+            if ws in self.active and state.get("enabled") and state.get("can_play", True):
+                return ws, state
+        return None
+
+    async def send_tts_event(self, data: dict):
+        for ws, state in self._sorted_tts_clients():
+            if ws not in self.active or not state.get("enabled") or not state.get("can_play", True):
+                continue
+            payload = json.loads(json.dumps(data, ensure_ascii=False))
+            if isinstance(payload.get("data"), dict):
+                payload["data"]["target_client_id"] = self.client_ids.get(ws, "")
+            try:
+                await ws.send_text(json.dumps(payload, ensure_ascii=False))
+                return
+            except Exception as e:
+                log.warning("WS send_tts_event failed: %s", e)
+                if ws in self.active:
+                    self.active.remove(ws)
+                self.tts_clients.pop(ws, None)
+                self.client_ids.pop(ws, None)
+        log.debug("TTS event dropped because no playable client is active: %s", data.get("type"))
 
     async def broadcast(self, data: dict, exclude: WebSocket = None):
         msg = json.dumps(data, ensure_ascii=False)

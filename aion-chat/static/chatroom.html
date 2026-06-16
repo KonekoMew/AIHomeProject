@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#050923">
-<link rel="stylesheet" href="/static/chatroom.css?v=syslog-20260610a">
+<link rel="stylesheet" href="/static/chatroom.css?v=song-player-20260615c">
 </head>
 <body>
   <div class="app">
@@ -155,6 +155,43 @@
           <div class="field">
             <label>第二位 AI 音色</label>
             <select id="setTtsConnorVoice"></select>
+          </div>
+        </div>
+        <div class="settings-section-compact ambient-voice-settings">
+          <div class="field tts-toggle-row">
+            <span>环境侦听 <span class="ambient-voice-status" id="crAmbientVoiceStatus">关闭</span></span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="setAmbientVoiceEnabled" onchange="crOnAmbientVoiceToggle()">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="field">
+            <label>唤醒词</label>
+            <input id="setAmbientWakeWord" type="text" placeholder="现在立刻唤醒" onchange="crSaveAmbientVoiceSettings()">
+          </div>
+          <div class="field">
+            <label>结束词</label>
+            <input id="setAmbientStopWord" type="text" placeholder="结束立刻唤醒" onchange="crSaveAmbientVoiceSettings()">
+          </div>
+          <div class="settings-inline-row">
+            <div class="field">
+              <label>累计字数</label>
+              <input id="setAmbientMinChars" type="number" min="80" max="2000" value="500" onchange="crSaveAmbientVoiceSettings()">
+            </div>
+            <div class="field">
+              <label>检查间隔（秒）</label>
+              <input id="setAmbientIntervalSec" type="number" min="20" max="600" value="120" onchange="crSaveAmbientVoiceSettings()">
+            </div>
+          </div>
+          <div class="ambient-buffer-panel">
+            <div class="ambient-buffer-head">
+              <span>待检查片段 <span id="crAmbientBufferMeta">0 字 / 0 段</span></span>
+              <div class="ambient-buffer-actions">
+                <button type="button" onclick="crToggleAmbientBufferView()" id="crAmbientBufferToggle">查看</button>
+                <button type="button" onclick="crClearAmbientBuffer()" class="danger">清空</button>
+              </div>
+            </div>
+            <div class="ambient-buffer-preview empty" id="crAmbientBufferPreview">暂无待检查片段</div>
           </div>
         </div>
         <button class="save-btn" onclick="saveSettings()">保存</button>
@@ -385,6 +422,6 @@
     </div>
   </div>
 
-  <script src="/static/chatroom.js?v=syslog-20260610a"></script>
+  <script src="/static/chatroom.js?v=song-player-20260615c"></script>
 </body>
 </html>

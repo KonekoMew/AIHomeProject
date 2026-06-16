@@ -10,6 +10,7 @@
 - **语音**：WebRTC VAD 语音检测 + 硬基流动 ASR (SenseVoiceSmall) + TTS (CosyVoice2) + 语音消息（按住录制）
 - **AI 接口**：硬基流动（OpenAI 兼容）、Google Gemini（REST API）、AiPro 中转站（OpenAI 兼容）、Gemini CLI（本地子进程调用，免费 OAuth 认证）、Codex CLI（本地子进程调用，Connor 专用）、Antigravity CLI（本地子进程调用，Google OAuth 认证，PowerShell Start-Transcript 捕获输出）
 - **AI 生图**：Gemini `gemini-3.1-flash-image-preview`（REST API generateContent，responseModalities=["IMAGE"]）
+- **AI 生成歌曲**：Gemini Lyria `lyria-3-pro-preview`（REST API generateContent，返回 audio inlineData，保存到 `data/songs/`）
 - **Embedding**：Gemini `gemini-embedding-001`（3072维）或 OpenAI 兼容向量模型（如硅基流动 `Qwen/Qwen3-Embedding-8B` 4096维），余弦相似度检索，支持设置页自定义切换
 - **Android App**：Java，WebView + 前台推送服务（OkHttp 4.12.0 WebSocket）+ 原生录音桥 + 原生摄像头桥 + 原生视频录制桥（MediaCodec + MediaMuxer），compileSdk 34 / minSdk 24
 - **音乐**：pyncm（网易云音乐 API，搜索/歌曲详情/音频URL，支持 MUSIC_U Cookie VIP 登录 + 服务端代理推流）
@@ -68,6 +69,7 @@
     ├── fund.py                    # 基金持仓监控：akshare数据拉取、盈亏计算、上证指数、历史走势、AI分析prompt生成、每日14:45定时任务(FundScheduler)
     ├── book.py                    # EPUB 解析模块：书籍导入、章节拆分、段落标注、图片提取
     ├── image_gen.py               # AI 生图模块：Gemini 图片生成（SELFIE/DRAW 模式）
+    ├── song_gen.py                # AI 生成歌曲模块：Gemini Lyria、[SONG] 指令解析、歌词清理、歌曲保存
     ├── mcp_client.py              # MCP 连接管理器：管理多个 MCP Server 连接（HTTP/stdio）、工具发现、统一 call_tool 接口、转换 OpenAI tools 格式
     ├── context_builder.py          # 统一上下文构建：fetch_merged_timeline（合并私聊+群聊消息时间线）、render_merged_timeline（场景切换标记渲染）、build_ability_block、build_memory_blocks、strip_tool_commands
     ├── chatroom.py                # 聊天室核心逻辑：Connor-Codex 代理调用（HTTP+taskId轮询+images）、统一时间线上下文构建、统一记忆总结（Connor 1v1+群聊合并，独立锚点 connor_unified）、1h无消息自动总结、Connor 人设统一读取（chatroom_config 优先，persona.md 兑底）
@@ -75,13 +77,13 @@
     │   ├── __init__.py
     │   ├── book.py               # 阅读功能 API：书籍上传/列表/章节/进度/删除/图片/AI批注（Aion+Connor并行，单段+全章SSE）/用户高亮（框选多目标提问持久化CRUD）
     │   ├── theater.py            # 小剧场 API：独立对话CRUD、消息CRUD、角色CRUD、SSE流式回复（无记忆/系统能力注入）+ TTS
-    ├── chat.py               # 对话/消息 CRUD、send_message(SSE)、regenerate、cam-check-trigger、[MUSIC:xxx]/[ALARM:...]/[REMINDER:...]/[Monitor:...]/[TOY:x]/[查看动态:n]/[视频电话] 检测
+    ├── chat.py               # 对话/消息 CRUD、send_message(SSE)、regenerate、cam-check-trigger、[MUSIC:xxx]/[SONG]...[/SONG]/[ALARM:...]/[REMINDER:...]/[Monitor:...]/[TOY:x]/[查看动态:n]/[视频电话] 检测
     │   ├── music.py              # 音乐搜索/详情/播放/代理推流 API（pyncm）
     │   ├── schedule.py           # 日程 CRUD API（列表/添加/删除）
     │   ├── cam.py                # 摄像头控制 + 监控日志 API + ESP32-CAM 画面源切换/桥接帧接收
     │   ├── location.py           # 定位 API：心跳上报、状态查询、POI搜索、配置管理、设置家位置
     │   ├── files.py              # 上传、聊天记录文件导出/管理
-    │   ├── settings.py           # 设置、世界书、模型列表、TTS 代理、视频通话开关、AI生图开关
+    │   ├── settings.py           # 设置、世界书、模型列表、TTS 代理、视频通话开关、AI生图开关、AI生成歌曲开关
     │   ├── memories.py           # 记忆库 CRUD + 手动总结触发 + 原文查看 + 锚点管理 API
     │   ├── heart_whispers.py     # 心语 API（列表查询 + 删除，旧版兼容保留）
     │   ├── moments.py            # 朋友圈 API（发布/删除/点赞点踩/评论/AI自动回复/未读红点）
@@ -147,6 +149,7 @@
         ├── location_status.json  # 定位状态缓存（当前坐标、状态、地址、天气、POI等）
         ├── digest_anchor.json    # 总结锚点（记录上次总结到哪条消息的时间戳）
         ├── uploads/              # 上传的图片/视频
+        ├── songs/                # Gemini Lyria 生成歌曲音频
         ├── chats/                # 导出的 .md 聊天记录 + _index.json
         ├── screenshots/          # 摄像头截图（自动清理）
         ├── monitor_logs/         # Sentinel 监控日志（JSONL，按日期，3天自动清理）
@@ -193,6 +196,7 @@
 | `/public/*` | 公共资源 |
 | `/static/*` | 静态文件 |
 | `/uploads/*` | data/uploads/（主聊天上传） |
+| `/songs/*` | data/songs/（AI 生成歌曲音频） |
 | `/cr-uploads/*` | Connor-Codex/uploads/（聊天室图片，按日期子目录） |
 | `/api/*` | 后端 API |
 | `/ws` | WebSocket 多端同步 |
@@ -266,7 +270,7 @@
 25. **多场景触发** — 用户发消息后的 AI 流式回复、重新生成、Core 主动发言（哨兵唤醒/闹铃/定时监控/[CAM_CHECK] 跟进）均自动创建 TTSStreamer 进行流式合成
 26. **音色选择** — 齿轮配置面板内选择硅基流动账号下的自定义音色，通过 WebSocket `tts_state` 消息同步到服务端
 27. **前端队列播放** — 前端维护 `ttsQueue`（Map 结构，key 为 msg_id），每条消息的分片按 seq 顺序播放，多条消息按到达顺序排队；播放完最后一片后服务端广播 `tts_done` 事件，前端清理队列并继续下一条
-28. **多端 TTS 状态同步** — 前端开启 TTS 后通过 WebSocket 发送 `tts_state` 消息（含 enabled/voice），服务端 `ConnectionManager` 在 `tts_clients` 字典中跟踪各客户端状态；同时 HTTP POST（send_message/regenerate）的 body 中也携带 `tts_enabled`/`tts_voice` 作为 `_tts_fallback` 回落，确保服务端发起的消息（cam_check/闹铃/监控）也能获取 TTS 状态
+28. **多端 TTS 状态同步** — 前端开启 TTS 后通过 WebSocket 发送 `tts_state` 消息（含 enabled/voice/can_play/active_at），服务端 `ConnectionManager` 在 `tts_clients` 字典中跟踪各客户端状态，并将 `tts_chunk`/`tts_done` 定向给最近可播放的客户端；页面进入后台、pagehide/freeze 时前端会撤销播放资格并清空本地 TTS 队列，恢复前台后只接收恢复之后生成的新分片；同时 HTTP POST（send_message/regenerate）的 body 中也携带 `tts_enabled`/`tts_voice` 作为 `_tts_fallback` 回落，确保服务端发起的消息（cam_check/闹铃/监控）也能获取 TTS 状态
 28b. **TTS 音频缓存** — 合成的音频分片存储在 `data/tts_cache/` 目录，文件名为 `{msg_id}_s{seq}.mp3`，前端可通过 `/api/tts/audio/{chunk_name}` 获取；点击 AI 消息的 🔊 图标可重播已缓存的 TTS 分片
 28c. **TTS 重播** — 点击聊天气泡下的喇叭图标，前端通过 HEAD 请求探测 `{msg_id}_s0`、`{msg_id}_s1`... 是否存在，依次播放所有分片；支持 GET 和 HEAD 两种 HTTP 方法
 
@@ -419,6 +423,44 @@
   ├ 浏览器：fetch → blob → createObjectURL → <a download> 模拟点击
   └ Android App：fetch → blob → FileReader → base64 → AionImageSaver.save() → MediaStore 写入相册
 ```
+
+### AI 生成歌曲（[SONG]...[/SONG]）
+412. **AI 自主写歌** — 开启「允许 AI 生成歌曲」后，系统能力会注入 `[SONG]...[/SONG]` 写歌格式。AI 先在普通回复里给一句简短回应/歌名，再把完整歌曲生成参数放进隐藏 SONG 块
+413. **歌词格式约束** — SONG 块使用 `Title`、`Style`、`Singer/Vocal`、`Duration`、`Prompt`、`Lyrics` 字段；歌词使用 `[Verse 1]`、`[Pre-Chorus]`、`[Chorus]`、`[Bridge]` 等分段标签，避免生成器拿到散乱文本
+414. **声线控制** — `Singer/Vocal` 字段必须写明声线和唱法，例如 male baritone、male bass、male tenor、female alto、duet、choir、instrumental。用户要求男声时会明确避免女声
+415. **异步生成** — 后端从 AI 回复中提取 SONG 块并清理显示文本，通过后台任务调用 Gemini Lyria，不阻塞继续聊天
+416. **Lyria API** — 当前使用 `lyria-3-pro-preview`，走现有 Gemini 付费 Key，REST `generateContent` 端点，解析返回的 audio `inlineData`
+417. **歌曲存储** — 生成音频保存到 `data/songs/song_gen_{timestamp}.{ext}`，通过 `/songs/*` 静态路由访问，不再混入 `data/uploads/`
+418. **歌曲消息** — 生成完成后创建新的 assistant 消息，正文为 `为你写的歌《歌名》`，附件类型为 `generated_song`
+419. **附件数据** — `generated_song` 包含 `url`、`title`、`mime_type`、`model`、`lyrics`、`prompt`、`description` 等字段，歌词只保存在附件/播放器中，不额外刷一条超长聊天消息
+420. **音乐卡片** — 聊天和聊天室都会渲染生成歌曲卡片，显示歌名、模型、音频控件和「打开播放器」按钮
+421. **播放器子页** — 点击卡片打开小播放器浮层，展示歌名、歌词滚动区、播放/暂停、时间和进度条；进度通过 audio 事件 + `requestAnimationFrame` 同步刷新
+422. **等待提示** — 歌曲生成期间在触发消息下方显示「歌曲谱写中....」，收到完成/失败事件或新歌曲卡片后自动移除
+423. **开关控制** — 聊天配置面板中的「允许 AI 生成歌曲」控制 SONG 能力是否注入 prompt；私聊和群聊/聊天室共用同一开关
+
+### AI 生成歌曲工作流程
+```
+【AI 触发写歌（私聊 / 群聊）】
+  用户要求写一首歌
+  → AI 输出短回复 + [SONG]...[/SONG] 隐藏块
+  → 后端提取 SONG prompt，清理可见回复和误输出歌词
+  → SSE/WS 广播 song_gen_start 或 chatroom_song_gen_start
+  → 前端显示「歌曲谱写中....」
+  → asyncio.create_task(_do_song_gen / _chatroom_song_gen)
+
+【异步生成（song_gen.generate_song）】
+  → POST https://generativelanguage.googleapis.com/v1beta/models/lyria-3-pro-preview:generateContent
+  → 解析 response → 提取 audio inlineData
+  → 保存到 data/songs/song_gen_{timestamp}.{ext}
+  → 创建 assistant 消息，attachments=[{type:"generated_song", ...}]
+  → WebSocket 广播 msg_created + song_gen_done / chatroom_song_gen_done
+  → 前端移除等待提示 + 渲染歌曲卡片
+
+【生成失败】
+  → WebSocket 广播 song_gen_failed / chatroom_song_gen_failed
+  → 前端移除等待提示
+```
+
 215. **消息保存** — 通话中的视频片段正常保存到聊天记录，视频文件上传到 `data/uploads/`，转写文本存入附件数据
 216. **Chrome 兼容** — PC/手机 Chrome 浏览器使用标准 `getUserMedia` API 获取摄像头+麦克风，无需原生桥；Android WebView 自动 fallback 到 `CameraBridge` + `AudioBridge` + `VideoBridge`
 
@@ -488,7 +530,7 @@
 70. **多端同步** — 音乐卡片通过 SSE + WebSocket 双通道广播，语音通话触发的点歌也能在所有端展示
 71. **VIP 登录** — 支持在设置面板配置网易云 `MUSIC_U` Cookie，以 VIP 身份登录 pyncm，可播放付费/VIP 歌曲；未配置时退回匿名登录
 71b. **服务端代理推流** — 新增 `/api/music/stream/{song_id}` 路由，后端实时获取网易云 CDN URL 并通过 httpx 流式转发音频给前端，解决防盗链和 CDN 链接过期问题，手机端也能稳定播放
-71c. **自动播放** — AI 点歌后浏览器自动开始播放第一首歌曲，无需用户手动点击；闹铃/定时监控触发时 AI 也可点歌并自动播放，实现音乐闹钟效果
+71c. **自动播放** — AI 点歌后浏览器自动开始播放第一首歌曲，无需用户手动点击；闹铃/定时监控触发时 AI 也可点歌并自动播放，实现音乐闹钟效果；音乐事件走独立 `music` 广播和播放器，不受 TTS 播放端 lease 限制
 71d. **闹铃/监控点歌能力** — 闹铃触发和定时监控触发时的 Prompt 中注入 `[MUSIC:xxx]` 等系统能力指令，AI 可在提醒回复中主动点歌
 
 ### 音乐点歌工作流程
@@ -1294,6 +1336,7 @@
 | `/api/worldbook` | GET/POST | 读取/保存世界书 |
 | `/api/chat_status` | GET | 获取当前聊天状态摘要 |
 | `/api/models` | GET | 可用模型列表 |
+| `/api/settings/song-gen` | GET/PUT | 读取/更新 AI 生成歌曲开关（`{enabled}`），控制 SONG 能力是否注入 prompt |
 
 ### 记忆库
 | 端点 | 方法 | 说明 |
@@ -1404,6 +1447,9 @@
 | `poi_search` | POI 搜索触发：含 msg_id + categories，前端显示蓝色搜索指示器 |
 | `toy_command` | 玩具控制指令：含 commands 数组 + msg_id |
 | `image_gen_start` | AI 生图开始：含 msg_id + prompt + is_selfie，前端显示橙色生图指示器 |
+| `song_gen_start` | AI 生成歌曲开始：含 conv_id + msg_id，前端显示「歌曲谱写中....」 |
+| `song_gen_done` | AI 生成歌曲完成：前端移除等待提示 |
+| `song_gen_failed` | AI 生成歌曲失败：前端移除等待提示 |
 | `debug` | Debug 数据：模型名、token 用量、召回记忆、完整 prompt |
 | `done` | 流结束 |
 
@@ -1428,12 +1474,18 @@
 | `location_update` | 定位状态更新广播（地址、天气、状态变更等） |
 | `poi_search` | POI 搜索触发广播（SSE + WS 双通道，前端显示搜索指示器） |
 | `activity_log` | 新设备活动日志推送（含 device/app/title/time，前端实时追加） |
-| `tts_chunk` | TTS 音频分片推送（含 msg_id/seq/url），前端收到即加入播放队列 |
-| `tts_done` | TTS 合成完毕通知（含 msg_id），前端标记该消息队列已结束，播完最后一片后清理 |
-| `tts_state` | 客户端→服务端：TTS 开关/音色同步（`{enabled, voice}`），服务端据此判断是否需要合成 |
+| `tts_chunk` | TTS 音频分片推送（含 msg_id/seq/url/created_at/target_client_id），目标前端收到后按播放资格加入播放队列 |
+| `tts_done` | TTS 合成完毕通知（含 msg_id/created_at/target_client_id），目标前端标记该消息队列已结束，播完最后一片后清理 |
+| `tts_state` | 客户端→服务端：TTS 开关/音色/播放资格同步（`{enabled, voice, can_play, active_at}`），服务端据此判断是否需要合成和哪端负责播放 |
 | `image_gen_start` | AI 生图开始广播（SSE + WS 双通道） |
 | `image_gen_done` | AI 生图完成广播（含 conv_id），前端移除指示器 |
 | `image_gen_failed` | AI 生图失败广播（含 conv_id），前端移除指示器 |
+| `song_gen_start` | 私聊 AI 生成歌曲开始广播，前端显示「歌曲谱写中....」 |
+| `song_gen_done` | 私聊 AI 生成歌曲完成广播，前端移除等待提示 |
+| `song_gen_failed` | 私聊 AI 生成歌曲失败广播，前端移除等待提示 |
+| `chatroom_song_gen_start` | 聊天室 AI 生成歌曲开始广播，前端显示「歌曲谱写中....」 |
+| `chatroom_song_gen_done` | 聊天室 AI 生成歌曲完成广播，前端移除等待提示 |
+| `chatroom_song_gen_failed` | 聊天室 AI 生成歌曲失败广播，前端移除等待提示 |
 
 ### 消息角色说明
 | 角色 | 说明 | 是否显示在聊天 |
@@ -1459,6 +1511,7 @@
    - [TOY:STOP]             — 停止玩具（仅密语模式开启时）
    - [SELFIE:prompt]        — AI 自拍生图（附带参考图，仅 AI 生图开关开启时）
    - [DRAW:prompt]          — AI 自由画图（仅 AI 生图开关开启时）
+   - [SONG]...[/SONG]       — AI 生成完整歌曲（仅 AI 生成歌曲开关开启时，要求 Title/Style/Singer/Vocal/Duration/Prompt/Lyrics 标准格式）
    - 【当前日程列表】         — 活跃日程/闹铃一览
    - 【位置信息】             — 当前地址 + 实时天气 + 离家距离 + 状态（仅有有效坐标时注入）
 4. 当前准确时间                                                    ← ⚡缓存分界点
@@ -1485,12 +1538,12 @@
 - **PC 显示器状态检测**：`PCDisplayTracker` 通过隐藏窗口注册 Windows `GUID_CONSOLE_DISPLAY_STATE` 电源通知，同时在截图前使用 DDC/CI `GetVCPFeatureAndVCPFeatureReply(0xD6)` 查询物理显示器电源模式；若物理显示器返回 standby/suspend/off/hard off 或连续不可达，则跳过 PC 屏幕截图。`GetLastInputInfo()` 作为状态未知时的空闲兜底
 - **手机屏幕监督架构**：`WebViewActivity` 注入 `window.AionPhoneScreen`，设置页调用 `requestPermission()` 拉起 MediaProjection 授权；`AionPushService` 使用 `FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION` 创建 `VirtualDisplay + ImageReader`。收到 `monitor_alert` / `cam_check` 后延迟约 4.2 秒，确认 `PowerManager.isInteractive()` 且 `KeyguardManager` 未锁屏后抓一帧，JPEG 压缩上传到 `/api/phone-screen/upload`
 - **Sentinel 日志压缩**：哨兵每次分析时输出历史概况摘要（summary），避免 Core 唤醒时全量日志导致 token 过高
-- **TTS 流式推送架构**：`tts.py` 的 `TTSStreamer` 在 AI 流式输出过程中实时接收文本（`feed()`），按标点（句号/问号/感叹号/换行等）切分为 100-200 字的片段（`_try_split()` + `_find_cut_position()`），每段 `asyncio.create_task` 异步调用硅基流动 CosyVoice2-0.5B 合成 mp3（`_synthesize()`），合成完成后通过 `_dispatch()` 将音频保存到 `data/tts_cache/{msg_id}_s{seq}.mp3` 并 WebSocket 广播 `tts_chunk` 事件；`flush()` 在 AI 输出结束后处理剩余文本并等待所有合成任务完成，最后广播 `tts_done` 事件
-- **TTS 多端状态同步**：前端开启 TTS 后通过 WebSocket 发送 `tts_state` 消息，`ConnectionManager.tts_clients` 字典跟踪各连接的 TTS 状态；HTTP POST（send_message/regenerate）body 中的 `tts_enabled`/`tts_voice` 通过 `set_tts_fallback()` 存入 `_tts_fallback` 作为回落，确保 cam_check/闹铃/定时监控等服务端发起的消息也能正确获取 TTS 状态（`any_tts_enabled()` + `get_tts_voice()` 同时检查两处）
+- **TTS 流式推送架构**：`tts.py` 的 `TTSStreamer` 在 AI 流式输出过程中实时接收文本（`feed()`），按标点（句号/问号/感叹号/换行等）切分为 100-200 字的片段（`_try_split()` + `_find_cut_position()`），每段 `asyncio.create_task` 异步调用硅基流动 CosyVoice2-0.5B 合成 mp3（`_synthesize()`），合成完成后通过 `_dispatch()` 将音频保存到 `data/tts_cache/{msg_id}_s{seq}.mp3` 并通过 `ConnectionManager.send_tts_event()` 定向推送 `tts_chunk` 事件给当前 TTS 播放端；`flush()` 在 AI 输出结束后处理剩余文本并等待所有合成任务完成，最后定向推送 `tts_done` 事件
+- **TTS 多端状态同步**：前端开启 TTS 后通过 WebSocket 发送 `tts_state` 消息，`ConnectionManager.tts_clients` 字典跟踪各连接的 TTS 状态、播放资格和最近活跃时间；HTTP POST（send_message/regenerate）body 中的 `tts_enabled`/`tts_voice` 通过 `set_tts_fallback()` 存入 `_tts_fallback` 作为回落，确保 cam_check/闹铃/定时监控等服务端发起的消息也能正确获取 TTS 状态（`any_tts_enabled()` + `get_tts_voice()` 同时检查两处）
 - **PC 活动采集**：`PCActivityTracker` 守护线程通过 `win32gui.GetForegroundWindow()` + `psutil.Process.name()` 每 60 秒记录前台窗口，通过 `asyncio.run_coroutine_threadsafe()` 桥接主事件循环上报；`PCDisplayTracker` 另起守护线程监听显示器状态。`pywin32` 和 `psutil` 必须安装在项目 `.venv` 中（系统 Python 中的无效）
 - **App 名称解析**：服务端 `KNOWN_APPS` 字典映射 80+ 常见包名/进程名→中文名，`resolve_app_name()` 返回 `None` 表示需过滤的系统应用（桌面、SystemUI 等），读取历史日志时 `_resolve_entries()` 对旧条目重新解析确保名称一致
 - **活动日志清理**：`cleanup_old_activity_logs()` 读取→过滤→重写 JSONL 文件，仅保留 `KEEP_HOURS=8` 小时内的条目，每次上报时顺带执行
-- **TTS 前端播放流程**：前端 `ttsQueue`（Map，key=msg_id）维护各消息的播放队列，`playNextTTSChunk()` 按 seq 顺序取出分片 URL 播放；收到 `tts_done` WebSocket 事件后标记 `q.finished = true`，当最后一片播放完毕且队列标记结束时，调用 `finishTTSForMsg()` 清理并通知语音模块（`notifyVoiceAiSpeaking(false)`）恢复录音
+- **TTS 前端播放流程**：前端 `ttsQueue`（Map，key=msg_id）维护各消息的播放队列，`playNextTTSChunk()` 按 seq 顺序取出分片 URL 播放；收到 `tts_done` WebSocket 事件后标记 `q.finished = true`，当最后一片播放完毕且队列标记结束时，调用 `finishTTSForMsg()` 清理并通知语音模块（`notifyVoiceAiSpeaking(false)`）恢复录音；前端在后台/隐藏/pagehide/freeze 时停止 live TTS、清空队列并拒收早于恢复时间的分片，避免手机端恢复后补播白天在电脑端已听过的语音
 - **消息编辑 attachments 修复**：后端 `update_message` 广播前 `json.loads` 解析 attachments，避免前端收到字符串导致渲染崩溃
 - **PWA 架构**：`sw.js` 和 `manifest.json` 物理存放在 `static/` 目录，但通过 `main.py` 的独立路由从根路径 `/sw.js`、`/manifest.json` 提供，确保 Service Worker 作用域覆盖全站
 - **外网访问**：通过 Tailscale 组建虚拟局域网，WireGuard 端到端加密，无需暴露公网端口；代码层面零改动，仅需两端安装 Tailscale 并登录同一账号
@@ -1505,6 +1558,8 @@
 - **音乐点歌架构**：`music.py` 封装 pyncm（`_ensure_session` 线程安全匿名登录），`routes/music.py` 提供 REST API 并导出 `MUSIC_CMD_PATTERN` 正则；`routes/chat.py` 在 send_message 和 regenerate 流结束后检测 `[MUSIC:xxx]`，搜索并通过 SSE `music` 事件 + WebSocket 广播发送卡片数据
 - **能力提示合并**：[MUSIC:xxx] 和 [CAM_CHECK] 合并为单个 `[系统能力]` user+assistant 对注入，减少 token 消耗（从 4 条消息降为 2 条）
 - **音乐前端渲染**：`msgMusicCards` 字典按消息 ID 存储卡片数据，`renderMusicCards()` / `buildMusicCardHtml()` 生成卡片 DOM，`playMusicOnline()` 创建固定底部播放器，`closeMusicPlayer()` 停止并移除
+- **AI 生成歌曲架构**：`song_gen.py` 封装 Gemini Lyria `lyria-3-pro-preview` 调用、SONG 指令格式、歌词清理和 `data/songs/` 文件保存；`routes/chat.py` / `routes/chatroom.py` 提取 `[SONG]...[/SONG]` 后异步生成歌曲，并创建 `generated_song` 附件消息
+- **AI 生成歌曲前端渲染**：`buildGeneratedSongCard()` / `crBuildGeneratedSongCard()` 渲染歌曲卡片，播放器浮层读取附件内的 title/lyrics/url/model，进度条通过 audio 事件和 `requestAnimationFrame` 同步；`song_gen_start` / `chatroom_song_gen_start` 显示「歌曲谱写中....」等待态
 - **日程/闹铃架构**：`schedule.py` 的 `ScheduleManager` 在独立线程运行（30 秒间隔），通过 `run_coroutine_threadsafe` 桥接主事件循环执行 DB 操作和 WebSocket 广播；`_fire_alarm` 复用 camera.py 相同的 Core 唤醒模式（世界书前缀+记忆+历史+触发提示）；`_parse_dt` 支持 6 种日期时间格式，仅日期时默认 09:00
 - **日程系统消息**：`_sys_msg()` 辅助函数在日程创建/删除时插入 system 角色消息到当前对话，风格与哨兵唤醒消息（📷）一致，使用 📅/🗑️ 图标前缀
 - **AionPushService 架构**：前台服务使用 OkHttp 4.12.0 维持独立 WebSocket 连接，与 WebView 内的 JS WebSocket 并行但互不干扰。通知通过 `NotificationManager` 发送，渠道 ID 区分优先级。心跳线程是纯 Java `Thread`（非 HandlerThread），`Thread.sleep()` 不依赖 Android Looper 消息队列，锁屏后仍能正常唤醒
@@ -1676,6 +1731,34 @@ python main.py
 | 长按返回键无效（Vivo X300 Pro 手势导航） | `onKeyLongPress` 不适用于手势导航的侧滑返回 | 改为 `onBackPressed` 弹出 AlertDialog |
 
 ## 更新日志
+
+### 2026-06-15 — Gemini Lyria AI 生成歌曲接入
+
+**背景**：在现有 Gemini 付费 Key 基础上接入 Lyria 歌曲生成，让聊天里的“写一首歌”可以从歌词/风格/声线描述直接变成可播放音频，并且私聊和群聊都能使用。
+
+**改动内容**：
+1. **`song_gen.py` — Lyria 歌曲生成模块**
+   - 新增 `[SONG]...[/SONG]` 指令格式，要求 `Title`、`Style`、`Singer/Vocal`、`Duration`、`Prompt`、`Lyrics`
+   - 使用 Gemini Lyria `lyria-3-pro-preview` 的 REST `generateContent` 接口，解析返回的 audio `inlineData`
+   - 生成文件保存到 `data/songs/song_gen_{timestamp}.{ext}`，通过 `/songs/*` 访问
+   - 清理 AI 误输出的歌词正文，避免聊天气泡里额外出现超长歌词
+
+2. **`routes/chat.py` / `routes/chatroom.py` — 私聊和群聊统一支持**
+   - 仅当「允许 AI 生成歌曲」开启时注入 SONG 能力提示
+   - 检测 SONG 块后异步生成歌曲，正文统一为 `为你写的歌《歌名》`
+   - 创建 `generated_song` 附件消息，保存歌曲 URL、标题、模型、歌词、原始 prompt
+   - 生成期间广播 `song_gen_start` / `chatroom_song_gen_start`，完成或失败后广播对应 done/failed 事件
+
+3. **前端歌曲卡片和播放器**
+   - 私聊和聊天室都支持生成歌曲卡片，提供内联 audio 和「打开播放器」
+   - 小播放器浮层展示歌名、模型、可滚动歌词、播放/暂停、时间和进度条
+   - 进度条通过 audio 事件 + `requestAnimationFrame` 实时同步
+   - 等待期间显示「歌曲谱写中....」，真正歌曲卡片到达后自动移除
+
+4. **设置和存储整理**
+   - 新增 `/api/settings/song-gen` GET/PUT，和聊天界面右上角开关联动
+   - 新增 `SONGS_DIR = data/songs`，生成歌曲不再和普通上传混放在 `data/uploads/`
+   - 已迁移旧的生成歌曲文件到 `data/songs/` 并修正对应附件 URL
 
 ### 2026-05-30 — Antigravity CLI 管线接入
 

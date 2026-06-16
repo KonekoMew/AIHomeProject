@@ -14,6 +14,7 @@ from database import get_db
 from activity import is_activity_tracking_enabled
 from schedule import get_active_schedules, build_schedule_prompt
 from luckin import LUCKIN_CMD_PATTERN, luckin_ability_text
+from song_gen import SONG_CMD_PATTERN, build_song_gen_ability_text
 from memory import (
     instant_digest, recall_memories, build_surfacing_memories,
     fetch_source_details,
@@ -26,6 +27,7 @@ MEMORY_CMD_PATTERN = re.compile(
     r'\[\s*M[\u200b\u200c\u200d\ufeff]*E[\u200b\u200c\u200d\ufeff]*M[\u200b\u200c\u200d\ufeff]*O[\u200b\u200c\u200d\ufeff]*R[\u200b\u200c\u200d\ufeff]*Y\s*[：:]\s*([^\]]+)\]',
     re.IGNORECASE,
 )
+WISH_CMD_PATTERN = re.compile(r'\[\s*许愿\s*[：:]\s*([^\]]+)\]')
 ACTIVITY_CHECK_PATTERN = re.compile(r'\[查看动态:(\d+)\]')
 SELFIE_CMD_PATTERN = re.compile(r'\[SELFIE:\s*([^\]]+)\]')
 DRAW_CMD_PATTERN = re.compile(r'\[DRAW:\s*([^\]]+)\]')
@@ -40,8 +42,8 @@ META_TAG_PATTERN = re.compile(r'\s*<meta\b[^>]*>.*?</meta\s*>', re.DOTALL | re.I
 
 # 所有需要从 AI 回复中剥离的工具指令正则列表（TTS、保存时统一清理）
 _ALL_CMD_PATTERNS = [
-    MUSIC_CMD_PATTERN, MOMENT_CMD_PATTERN, MEMORY_CMD_PATTERN,
-    ACTIVITY_CHECK_PATTERN, SELFIE_CMD_PATTERN, DRAW_CMD_PATTERN,
+    MUSIC_CMD_PATTERN, MOMENT_CMD_PATTERN, MEMORY_CMD_PATTERN, WISH_CMD_PATTERN,
+    ACTIVITY_CHECK_PATTERN, SELFIE_CMD_PATTERN, DRAW_CMD_PATTERN, SONG_CMD_PATTERN,
     POI_SEARCH_PATTERN, TOY_CMD_PATTERN, PET_CMD_PATTERN,
     HOME_CMD_PATTERN, LUCKIN_CMD_PATTERN, TRANSFER_CMD_PATTERN, PRIVATE_WHISPER_CMD_PATTERN,
 ]
@@ -284,6 +286,9 @@ async def build_ability_block(
             f"提示词请使用英文。一次回复只用一个生图指令。"
         )
 
+    if SETTINGS.get("song_gen_enabled", False):
+        abilities.append(build_song_gen_ability_text(user_name))
+
     if _is_pet_available():
         abilities.append(
             "[PET:动作名] — 控制桌面宠物切换动画表情。"
@@ -301,6 +306,10 @@ async def build_ability_block(
     abilities.append(
         f"[MEMORY:内容] — 当有特别重大的事件需要记录，或当{user_name}明确要求你"
         f"记住某件事的时候，可以用该指令录入记忆库。禁止滥用。"
+    )
+    abilities.append(
+        "[许愿：内容] — 当你在日常聊天中自然产生一个想投进许愿池的愿望时，可以使用该指令。"
+        "愿望会记录为你自己的愿望，内容直接写愿望本身即可。禁止滥用。"
     )
     try:
         if who == "connor":
@@ -522,7 +531,7 @@ async def build_memory_blocks(
 # ══════════════════════════════════════════════════
 
 # 系统消息过滤关键词（只保留包含这些关键词的系统消息）
-SYSTEM_MSG_CONTEXT_KEYWORDS = ('搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话')
+SYSTEM_MSG_CONTEXT_KEYWORDS = ('搜索了', '点歌', '点了一首', '推荐了', '查看了动态', '视频通话', '环境语音')
 
 # 聊天室图片标记 [[image:/uploads/xxx.jpg]] / [[image:/cr-uploads/xxx.jpg]]
 # 这些标记会泄漏文件路径到 LLM 上下文，污染 instant_digest 关键词，

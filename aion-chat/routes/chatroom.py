@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from config import DEFAULT_MODEL, DATA_DIR, CODEX_UPLOADS_DIR, MODELS
+from config import DEFAULT_MODEL, DATA_DIR, CODEX_UPLOADS_DIR, MODELS, SETTINGS, get_sentinel_config
 from database import get_db
 from ws import manager
 from ai_providers import stream_ai, CLI_STATUS_PREFIX
@@ -28,9 +28,10 @@ from chatroom import (
 )
 from context_builder import (
     MUSIC_CMD_PATTERN, MOMENT_CMD_PATTERN, MEMORY_CMD_PATTERN,
-    ACTIVITY_CHECK_PATTERN, SELFIE_CMD_PATTERN, DRAW_CMD_PATTERN,
+    ACTIVITY_CHECK_PATTERN, SELFIE_CMD_PATTERN, DRAW_CMD_PATTERN, SONG_CMD_PATTERN,
     POI_SEARCH_PATTERN, TOY_CMD_PATTERN, PET_CMD_PATTERN,
     PRIVATE_WHISPER_CMD_PATTERN, VIDEO_CALL_CMD, META_TAG_PATTERN, strip_tool_commands,
+    WISH_CMD_PATTERN,
     append_message_meta,
 )
 from memory import get_embedding, _pack_embedding, memory_kind_for_type, memory_kind_label
@@ -38,11 +39,16 @@ from schedule import process_schedule_commands, ALARM_CMD, REMINDER_CMD, MONITOR
 from music import search_songs, get_audio_url
 from camera import cam, CAM_CHECK_CMD
 from luckin import handle_luckin_commands, luckin_payment_attachments
+from song_gen import clean_song_visible_reply
 
 router = APIRouter(prefix="/api/chatroom", tags=["chatroom"])
 
 TRANSFER_CMD_PATTERN = re.compile(r'\[转账(?:给([^：:]+?))?[：:]\s*(-?\d+(?:\.\d+)?)\s*元\]')
 _STRUCTURED_LINE_RE = re.compile(r"^\s*(```|[-*+]\s+|\d+[.)]\s+|[>|#]|\|)")
+_AMBIENT_LAST_TRIGGER_BY_ROOM: dict[str, float] = {}
+_AMBIENT_GENERATING_ROOMS: set[str] = set()
+_AMBIENT_LISTENER_TTL = 18.0
+_AMBIENT_ACTIVE_LISTENER: dict = {}
 
 
 def _normalize_cli_bubble_breaks(text: str, model_key: str | None) -> str:
@@ -471,6 +477,28 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
                 except Exception as e:
                     print(f"[CHATROOM_MEMORY] 录入失败: {e}")
 
+    # ── 许愿池 ──
+    wish_matches = WISH_CMD_PATTERN.findall(full_text)
+    if wish_matches:
+        full_text = WISH_CMD_PATTERN.sub("", full_text)
+        try:
+            from wish_pool import create_wish
+            for wish_content in wish_matches:
+                wish_content = wish_content.strip()
+                if not wish_content:
+                    continue
+                await create_wish(
+                    author=who_identity,
+                    content=wish_content,
+                    visibility="shared",
+                    origin="chat_command",
+                    source_type="chatroom_command",
+                    source_ref=f"{room_id}:{msg_id}",
+                )
+                print(f"[CHATROOM_WISH] {who_label}: {wish_content[:80]}")
+        except Exception as e:
+            print(f"[CHATROOM_WISH] 许愿失败: {e}")
+
     # ── POI 搜索 ──
     poi_matches = POI_SEARCH_PATTERN.findall(full_text)
     if poi_matches:
@@ -534,6 +562,18 @@ async def _process_chatroom_commands(full_text: str, room_id: str, who: str, msg
         full_text = DRAW_CMD_PATTERN.sub("", full_text)
 
     # ── 视频通话 ──
+    song_match = SONG_CMD_PATTERN.search(full_text)
+    if song_match:
+        song_prompt = None
+        if SETTINGS.get("song_gen_enabled", False):
+            prompt = song_match.group(1).strip()
+            if prompt:
+                triggered["song_gen"] = {"prompt": prompt}
+                song_prompt = prompt
+        full_text = SONG_CMD_PATTERN.sub("", full_text)
+        if song_prompt:
+            full_text = clean_song_visible_reply(full_text)
+
     if VIDEO_CALL_CMD in full_text:
         full_text = full_text.replace(VIDEO_CALL_CMD, "")
 
@@ -594,7 +634,7 @@ def _luckin_attachments_from_triggered(triggered: dict) -> list[dict]:
 #  群聊工具指令后续动作（异步执行）
 # ══════════════════════════════════════════════════
 
-def _fire_chatroom_followups(triggered: dict, room_id: str, sender: str, model_key: str):
+def _fire_chatroom_followups(triggered: dict, room_id: str, sender: str, model_key: str, trigger_msg_id: str | None = None):
     """根据 _process_chatroom_commands 返回的 triggered dict，启动异步后续任务"""
     if triggered.get("cam_check"):
         asyncio.create_task(_chatroom_cam_check(room_id, sender, model_key))
@@ -605,6 +645,9 @@ def _fire_chatroom_followups(triggered: dict, room_id: str, sender: str, model_k
     if triggered.get("image_gen"):
         ig = triggered["image_gen"]
         asyncio.create_task(_chatroom_image_gen(room_id, sender, ig["prompt"], ig["is_selfie"]))
+    if triggered.get("song_gen"):
+        sg = triggered["song_gen"]
+        asyncio.create_task(_chatroom_song_gen(room_id, sender, sg["prompt"], trigger_msg_id))
 
 
 async def _chatroom_cam_check(room_id: str, sender: str, model_key: str, delay: float = 5.0):
@@ -861,6 +904,46 @@ async def _chatroom_image_gen(room_id: str, sender: str, prompt: str, is_selfie:
 
 
 # ── 图片 URL 检测 & 下载保存 ──
+async def _chatroom_song_gen(room_id: str, sender: str, prompt: str, trigger_msg_id: str | None = None):
+    """Generate a song for chatroom messages."""
+    from song_gen import generate_song
+
+    event_data = {"room_id": room_id, "sender": sender, "msg_id": trigger_msg_id}
+    await manager.broadcast({"type": "chatroom_song_gen_start", "data": event_data})
+    try:
+        result = await generate_song(prompt)
+        if result:
+            title = result.get("title") or "AI 生成歌曲"
+            attachment = {
+                "type": "generated_song",
+                "url": result.get("url"),
+                "title": title,
+                "mime_type": result.get("mime_type", "audio/mpeg"),
+                "model": result.get("model", "lyria-3-pro-preview"),
+            }
+            if result.get("lyrics"):
+                attachment["lyrics"] = result["lyrics"]
+            if result.get("prompt"):
+                attachment["prompt"] = result["prompt"]
+            if result.get("text"):
+                attachment["description"] = result["text"]
+            song_msg = await _save_msg(
+                room_id,
+                sender,
+                f"为你写的歌《{title}》",
+                attachments=[attachment],
+                auto_tts=False,
+            )
+            await manager.broadcast({"type": "chatroom_song_gen_done", "data": {**event_data, "song_msg_id": song_msg.get("id")}})
+            print(f"[CHATROOM_SONG_GEN] {sender} song generated, room={room_id}")
+        else:
+            await manager.broadcast({"type": "chatroom_song_gen_failed", "data": event_data})
+            print(f"[CHATROOM_SONG_GEN] {sender} song generation failed, room={room_id}")
+    except Exception as e:
+        await manager.broadcast({"type": "chatroom_song_gen_failed", "data": event_data})
+        print(f"[CHATROOM_SONG_GEN] {sender} song generation error: {e}")
+
+
 _IMG_URL_RE = re.compile(r'(https?://\S+\.(?:jpg|jpeg|png|gif|webp)(?:\?\S*)?)', re.IGNORECASE)
 _MD_IMG_RE = re.compile(r'!\[.*?\]\((https?://\S+?)\)')
 
@@ -1006,6 +1089,254 @@ async def _emit_chatroom_debug(_q: asyncio.Queue, payload: dict):
     await manager.broadcast({"type": "debug", "data": payload})
 
 
+def _ambient_voice_debug_payload(
+    *,
+    room_id: str,
+    transcript: str,
+    decision: dict | None = None,
+    skipped: str = "",
+    forced: bool = False,
+    speaker: str = "",
+    has_error: bool = False,
+    error_text: str | None = None,
+) -> dict:
+    scfg = get_sentinel_config()
+    clean_transcript = _ambient_excerpt(transcript, 900)
+    d = decision or {}
+    should_wake = bool(d.get("should_wake")) if decision is not None else False
+    return {
+        "type": "debug",
+        "log_kind": "ambient_voice",
+        "room_id": room_id,
+        "model": scfg.get("model") or "ambient-sentinel",
+        "msg_id": f"ambient_{time.time_ns()}",
+        "ambient_forced": forced,
+        "ambient_skipped": skipped,
+        "ambient_should_wake": should_wake,
+        "ambient_speaker": speaker,
+        "ambient_source": str(d.get("source_label") or d.get("source") or "")[:80],
+        "ambient_topic": str(d.get("topic") or "")[:120],
+        "ambient_reason": str(d.get("reason") or skipped or "")[:240],
+        "ambient_importance": d.get("importance", 0.0) if decision is not None else 0.0,
+        "ambient_summary": str(d.get("summary") or "")[:600],
+        "ambient_transcript_chars": len(transcript or ""),
+        "prompt_messages": [
+            {"role": "user", "content": f"ASR 转写：\n{clean_transcript}"}
+        ],
+        "prompt_count": 1,
+        "usage": None,
+        "recalled_memories": [],
+        "debug_top6": [],
+        "has_error": has_error,
+        "error_text": error_text if has_error else None,
+    }
+
+
+async def _emit_ambient_voice_debug(**kwargs):
+    payload = _ambient_voice_debug_payload(**kwargs)
+    await manager.broadcast({"type": "debug", "data": payload})
+    return payload
+
+
+def _ambient_listener_prune(now: float | None = None) -> bool:
+    global _AMBIENT_ACTIVE_LISTENER
+    if not _AMBIENT_ACTIVE_LISTENER:
+        return False
+    ts = float(_AMBIENT_ACTIVE_LISTENER.get("updated_at") or 0)
+    now = now or time.time()
+    if now - ts <= _AMBIENT_LISTENER_TTL:
+        return False
+    _AMBIENT_ACTIVE_LISTENER = {}
+    return True
+
+
+def _ambient_listener_state(now: float | None = None) -> dict:
+    _ambient_listener_prune(now)
+    if not _AMBIENT_ACTIVE_LISTENER:
+        return {"active": False, "ttl_seconds": int(_AMBIENT_LISTENER_TTL)}
+    state = dict(_AMBIENT_ACTIVE_LISTENER)
+    expires_at = float(state.get("updated_at") or 0) + _AMBIENT_LISTENER_TTL
+    state["active"] = True
+    state["expires_at"] = expires_at
+    state["ttl_seconds"] = int(_AMBIENT_LISTENER_TTL)
+    return state
+
+
+async def _ambient_listener_broadcast():
+    await manager.broadcast({"type": "ambient_voice_listener", "data": _ambient_listener_state()})
+
+
+def _clamp_int(value, default: int, min_value: int, max_value: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = default
+    return max(min_value, min(max_value, n))
+
+
+def _extract_json_object(raw: str | None) -> dict:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    if "```" in text:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            text = text[start:end]
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except Exception:
+            return {}
+    return {}
+
+
+def _ambient_excerpt(text: str, max_chars: int = 2400) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[-max_chars:]
+
+
+async def _judge_ambient_voice(transcript: str) -> dict:
+    from memory import _call_sentinel_text
+
+    scfg = get_sentinel_config()
+    if not scfg.get("api_key"):
+        return {
+            "should_wake": False,
+            "summary": "",
+            "topic": "",
+            "reason": "未配置哨兵模型",
+            "importance": 0.0,
+        }
+
+    user_name, ai_name, connor_name = get_chatroom_names()
+    prompt = (
+        "你是 AionsHome 的环境语音哨兵。输入来自当前认领前端麦克风的 ASR 转写，可能包含误识别、歌词、叹气、宠物/客人背景声、"
+        "用户自言自语、朋友聊天，或电脑外放的 AI/TTS 回声。\n"
+        "你的任务是判断是否值得让群聊里的一位 AI 自然插一句。请非常克制，避免把无意义碎片交给大模型。\n\n"
+        "判定规则：\n"
+        "1. 明确话题、有情绪、有决策、有分享欲、在讨论计划/作品/宠物/家庭动态/关系/烦恼/灵感时，可以 should_wake=true。\n"
+        "2. 纯噪声、重复歌词、无上下文感叹、很短的嗯啊、明显电视/电脑外放/AI 回复回声、无法判断主题时 should_wake=false。\n"
+        "3. 如果适合唤醒，请只提炼去噪后的摘要，不要保留无关口癖，不要把 ASR 错字当成事实。\n"
+        f"4. 当前群聊参与者是：{user_name}、{ai_name}、{connor_name}。摘要应描述“{user_name}刚刚在谈论什么”。\n\n"
+        "严格只输出 JSON，不要加解释。格式：\n"
+        "{\"should_wake\": boolean, \"topic\": \"短话题\", \"summary\": \"给大模型看的去噪摘要\", "
+        "\"reason\": \"短原因\", \"importance\": 0到1}\n\n"
+        f"ASR 转写：\n{_ambient_excerpt(transcript)}"
+    )
+    try:
+        raw = await _call_sentinel_text(scfg, prompt, timeout=25)
+        data = _extract_json_object(raw)
+    except Exception as e:
+        print(f"[AMBIENT_VOICE] sentinel failed: {e}")
+        return {"should_wake": False, "summary": "", "topic": "", "reason": str(e), "importance": 0.0}
+
+    summary = str(data.get("summary") or "").strip()
+    topic = str(data.get("topic") or "").strip()
+    reason = str(data.get("reason") or "").strip()
+    try:
+        importance = float(data.get("importance") or 0.0)
+    except (TypeError, ValueError):
+        importance = 0.0
+    return {
+        "should_wake": bool(data.get("should_wake")),
+        "summary": summary[:600],
+        "topic": topic[:120],
+        "reason": reason[:240],
+        "importance": max(0.0, min(1.0, importance)),
+    }
+
+
+def _ambient_voice_notice(decision: dict, *, forced: bool) -> str:
+    kind = "环境语音即时唤醒" if forced else "环境语音触发"
+    summary = (decision.get("summary") or "").strip()
+    topic = (decision.get("topic") or "").strip()
+    lines = [f"{kind}：{summary or topic or '检测到用户刚刚有一段现场谈话'}"]
+    if topic and topic not in lines[0]:
+        lines.append(f"话题：{topic}")
+    return "\n".join(lines)
+
+
+def _ambient_voice_prompt(decision: dict, *, forced: bool) -> str:
+    user_name, ai_name, connor_name = get_chatroom_names()
+    summary = (decision.get("summary") or "").strip()
+    topic = (decision.get("topic") or "").strip()
+    source_label = (decision.get("source_label") or "当前设备麦克风").strip()
+    source = "唤醒词触发的即时侦听" if forced else "环境语音哨兵筛选"
+    return (
+        "[环境语音]\n"
+        f"这是刚刚通过{source_label}听到的现场谈话摘要，来源：{source}。\n"
+        f"群聊参与者：{user_name}、{ai_name}、{connor_name}。\n"
+        f"话题：{topic or '未命名话题'}\n"
+        f"摘要：{summary or topic}\n\n"
+        "请把它当作刚刚发生的生活上下文，自然插一句。不要说明你收到了系统提示，不要复述“环境语音”这个来源。"
+    )
+
+
+async def _run_ambient_voice_reply(
+    room_id: str,
+    speaker: str,
+    decision: dict,
+    *,
+    model_key: str,
+    connor_model_key: str,
+    tts_enabled: bool,
+    tts_aion_voice: str,
+    tts_connor_voice: str,
+    forced: bool,
+):
+    if room_id in _AMBIENT_GENERATING_ROOMS:
+        return
+    _AMBIENT_GENERATING_ROOMS.add(room_id)
+    try:
+        room, _ = await _load_room_and_messages(room_id)
+        if not room or room.get("type") != "group":
+            return
+
+        manager.set_aion_last_active(f"chatroom:{room_id}")
+        manager.set_connor_last_active(room_id)
+        cam.reset_patrol_timer()
+
+        notice = _ambient_voice_notice(decision, forced=forced)
+        await _save_msg(room_id, "system", notice, msg_id=f"cm_{time.time_ns()}_av", auto_tts=False)
+        _, msgs = await _load_room_and_messages(room_id)
+
+        context_limit = room.get("context_minutes", 30)
+        query_text = decision.get("summary") or decision.get("topic") or ""
+        ambient_context = _ambient_voice_prompt(decision, forced=forced)
+        _q: asyncio.Queue = asyncio.Queue()
+
+        if speaker == "aion":
+            await _reply_aion(
+                room_id, msgs, context_limit, query_text, model_key, _q,
+                tts_enabled=tts_enabled,
+                tts_voice=tts_aion_voice,
+                ambient_context=ambient_context,
+            )
+        else:
+            await _reply_connor(
+                room_id, msgs, context_limit, query_text, _q,
+                connor_model_key=connor_model_key,
+                tts_enabled=tts_enabled,
+                tts_voice=tts_connor_voice,
+                ambient_context=ambient_context,
+            )
+    except Exception as e:
+        print(f"[AMBIENT_VOICE] reply failed: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        _AMBIENT_GENERATING_ROOMS.discard(room_id)
+
+
 # ── Pydantic 模型 ──
 
 class RoomCreate(BaseModel):
@@ -1052,6 +1383,31 @@ class ReplyOnceTrigger(BaseModel):
     tts_aion_voice: str = ""
     tts_connor_voice: str = ""
     whisper_mode: bool = False
+
+
+class AmbientVoiceEvaluate(BaseModel):
+    transcript: str
+    forced: bool = False
+    listener_client_id: str = ""
+    listener_source: str = ""
+    listener_label: str = ""
+    model: str = DEFAULT_MODEL
+    connor_model: str = "Codex"
+    tts_enabled: bool = False
+    tts_aion_voice: str = ""
+    tts_connor_voice: str = ""
+
+
+class AmbientVoiceListenerClaim(BaseModel):
+    client_id: str
+    room_id: Optional[str] = None
+    source: str = "browser"
+    label: str = ""
+    takeover: bool = False
+
+
+class AmbientVoiceListenerRelease(BaseModel):
+    client_id: str
 
 
 class MsgEditResend(BaseModel):
@@ -1232,6 +1588,12 @@ class ConfigUpdate(BaseModel):
     reply_order: Optional[str] = None
     connor_model: Optional[str] = None
     aion_model: Optional[str] = None
+    ambient_voice_enabled: Optional[bool] = None
+    ambient_voice_wake_word: Optional[str] = None
+    ambient_voice_stop_word: Optional[str] = None
+    ambient_voice_min_chars: Optional[int] = None
+    ambient_voice_interval_seconds: Optional[int] = None
+    ambient_voice_cooldown_seconds: Optional[int] = None
 
 
 # ══════════════════════════════════════════════════
@@ -1286,8 +1648,79 @@ async def update_config(body: ConfigUpdate):
         cfg["connor_model"] = body.connor_model or "Codex"
     if body.aion_model is not None:
         cfg["aion_model"] = body.aion_model
+    if body.ambient_voice_enabled is not None:
+        cfg["ambient_voice_enabled"] = bool(body.ambient_voice_enabled)
+    if body.ambient_voice_wake_word is not None:
+        cfg["ambient_voice_wake_word"] = (body.ambient_voice_wake_word or "").strip() or "现在立刻唤醒"
+    if body.ambient_voice_stop_word is not None:
+        cfg["ambient_voice_stop_word"] = (body.ambient_voice_stop_word or "").strip() or "结束立刻唤醒"
+    if body.ambient_voice_min_chars is not None:
+        cfg["ambient_voice_min_chars"] = _clamp_int(body.ambient_voice_min_chars, 500, 80, 2000)
+    if body.ambient_voice_interval_seconds is not None:
+        cfg["ambient_voice_interval_seconds"] = _clamp_int(body.ambient_voice_interval_seconds, 120, 20, 600)
+    if body.ambient_voice_cooldown_seconds is not None:
+        cfg["ambient_voice_cooldown_seconds"] = _clamp_int(body.ambient_voice_cooldown_seconds, 180, 30, 1800)
     save_chatroom_config(cfg)
+    if body.ambient_voice_enabled is False:
+        global _AMBIENT_ACTIVE_LISTENER
+        if _AMBIENT_ACTIVE_LISTENER:
+            _AMBIENT_ACTIVE_LISTENER = {}
+            await _ambient_listener_broadcast()
     return {"ok": True}
+
+
+@router.get("/ambient-voice/listener")
+async def ambient_voice_listener_state():
+    return {"ok": True, "listener": _ambient_listener_state()}
+
+
+@router.post("/ambient-voice/claim")
+async def ambient_voice_listener_claim(body: AmbientVoiceListenerClaim):
+    global _AMBIENT_ACTIVE_LISTENER
+    cfg = load_chatroom_config()
+    if not cfg.get("ambient_voice_enabled"):
+        return {"ok": False, "claimed": False, "reason": "disabled", "listener": _ambient_listener_state()}
+
+    client_id = (body.client_id or "").strip()[:120]
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required")
+
+    now = time.time()
+    _ambient_listener_prune(now)
+    current = _AMBIENT_ACTIVE_LISTENER
+    if current and current.get("client_id") != client_id and not body.takeover:
+        return {"ok": True, "claimed": False, "reason": "occupied", "listener": _ambient_listener_state(now)}
+
+    changed = (
+        not current
+        or current.get("client_id") != client_id
+        or current.get("source") != (body.source or "browser").strip()[:40]
+        or current.get("label") != (body.label or "").strip()[:80]
+        or current.get("room_id") != (body.room_id or "").strip()[:120]
+    )
+    _AMBIENT_ACTIVE_LISTENER = {
+        "client_id": client_id,
+        "room_id": (body.room_id or "").strip()[:120],
+        "source": (body.source or "browser").strip()[:40],
+        "label": (body.label or "").strip()[:80],
+        "updated_at": now,
+    }
+    if changed:
+        await _ambient_listener_broadcast()
+    return {"ok": True, "claimed": True, "listener": _ambient_listener_state(now)}
+
+
+@router.post("/ambient-voice/release")
+async def ambient_voice_listener_release(body: AmbientVoiceListenerRelease):
+    global _AMBIENT_ACTIVE_LISTENER
+    client_id = (body.client_id or "").strip()
+    released = False
+    _ambient_listener_prune()
+    if client_id and _AMBIENT_ACTIVE_LISTENER.get("client_id") == client_id:
+        _AMBIENT_ACTIVE_LISTENER = {}
+        released = True
+        await _ambient_listener_broadcast()
+    return {"ok": True, "released": released, "listener": _ambient_listener_state()}
 
 
 @router.get("/connor-status")
@@ -1799,6 +2232,129 @@ async def reply_once(room_id: str, body: ReplyOnceTrigger):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+@router.post("/rooms/{room_id}/ambient-voice/evaluate")
+async def ambient_voice_evaluate(room_id: str, body: AmbientVoiceEvaluate):
+    """当前前端环境侦听：ASR 文本先经哨兵筛选，必要时随机唤醒一位群聊 AI。"""
+    cfg = load_chatroom_config()
+    if not cfg.get("ambient_voice_enabled"):
+        return {"ok": True, "triggered": False, "skipped": "disabled"}
+
+    transcript = _ambient_excerpt(body.transcript, 3000)
+    if len(transcript) < 4:
+        return {"ok": True, "triggered": False, "skipped": "too_short"}
+
+    listener = _ambient_listener_state()
+    listener_client_id = (body.listener_client_id or "").strip()
+    if listener.get("active") and listener_client_id and listener.get("client_id") != listener_client_id:
+        return {
+            "ok": True,
+            "triggered": False,
+            "skipped": "listener_lost",
+            "listener": listener,
+        }
+    if listener.get("active") and not listener_client_id:
+        return {
+            "ok": True,
+            "triggered": False,
+            "skipped": "listener_required",
+            "listener": listener,
+        }
+    if not listener.get("active") and listener_client_id:
+        return {"ok": True, "triggered": False, "skipped": "listener_expired", "listener": listener}
+
+    room, _ = await _load_room_and_messages(room_id, limit=5)
+    if not room:
+        return {"ok": False, "triggered": False, "error": "room_not_found"}
+    if room.get("type") != "group":
+        debug_payload = await _emit_ambient_voice_debug(room_id=room_id, transcript=transcript, skipped="not_group_room")
+        return {"ok": True, "triggered": False, "skipped": "not_group_room", "debug": debug_payload}
+    if room_id in _AMBIENT_GENERATING_ROOMS:
+        debug_payload = await _emit_ambient_voice_debug(room_id=room_id, transcript=transcript, skipped="already_generating")
+        return {"ok": True, "triggered": False, "skipped": "already_generating", "debug": debug_payload}
+
+    forced = bool(body.forced)
+    source_label = (body.listener_label or body.listener_source or "当前设备麦克风").strip()[:80]
+    now = time.time()
+    cooldown = _clamp_int(cfg.get("ambient_voice_cooldown_seconds"), 180, 30, 1800)
+    last = _AMBIENT_LAST_TRIGGER_BY_ROOM.get(room_id, 0)
+    if not forced and last and now - last < cooldown:
+        remaining = max(0, int(cooldown - (now - last)))
+        debug_payload = await _emit_ambient_voice_debug(
+            room_id=room_id,
+            transcript=transcript,
+            skipped="cooldown",
+            decision={
+                "should_wake": False,
+                "reason": f"冷却中，剩余 {remaining} 秒",
+                "importance": 0.0,
+                "source_label": source_label,
+                "source": (body.listener_source or "").strip()[:40],
+            },
+        )
+        return {
+            "ok": True,
+            "triggered": False,
+            "skipped": "cooldown",
+            "cooldown_remaining": remaining,
+            "debug": debug_payload,
+        }
+
+    if forced:
+        decision = {
+            "should_wake": True,
+            "topic": "即时语音唤醒",
+            "summary": transcript[:600],
+            "reason": "wake_word",
+            "importance": 1.0,
+        }
+    else:
+        decision = await _judge_ambient_voice(transcript)
+    decision["source_label"] = source_label
+    decision["source"] = (body.listener_source or "").strip()[:40]
+    if not forced:
+        if not decision.get("should_wake"):
+            debug_payload = await _emit_ambient_voice_debug(
+                room_id=room_id,
+                transcript=transcript,
+                decision=decision,
+                skipped="sentinel_rejected",
+            )
+            return {"ok": True, "triggered": False, "decision": decision, "debug": debug_payload}
+
+    speaker = random.choice(["aion", "connor"])
+    debug_payload = await _emit_ambient_voice_debug(
+        room_id=room_id,
+        transcript=transcript,
+        decision=decision,
+        forced=forced,
+        speaker=speaker,
+    )
+    _AMBIENT_LAST_TRIGGER_BY_ROOM[room_id] = now
+    model_key = (body.model or cfg.get("aion_model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    connor_model_key = _resolve_connor_model(body.connor_model or cfg.get("connor_model"))
+
+    asyncio.create_task(_run_ambient_voice_reply(
+        room_id,
+        speaker,
+        decision,
+        model_key=model_key,
+        connor_model_key=connor_model_key,
+        tts_enabled=bool(body.tts_enabled),
+        tts_aion_voice=body.tts_aion_voice or "",
+        tts_connor_voice=body.tts_connor_voice or "",
+        forced=forced,
+    ))
+
+    return {
+        "ok": True,
+        "triggered": True,
+        "speaker": speaker,
+        "decision": decision,
+        "forced": forced,
+        "debug": debug_payload,
+    }
+
+
 @router.post("/messages/{msg_id}/edit-resend")
 async def edit_resend_chatroom_message(msg_id: str, body: MsgEditResend):
     """编辑用户消息后重发：更新内容，删除后续消息，再按房间类型重新生成回复。"""
@@ -2036,7 +2592,7 @@ async def _generate_connor_reply(room_id, room, msgs, _q, context_limit, *, conn
     ))
 
     # 触发后续动作
-    _fire_chatroom_followups(triggered, room_id, "connor", connor_model_key)
+    _fire_chatroom_followups(triggered, room_id, "connor", connor_model_key, connor_msg_id)
 
 
 async def _generate_group_replies(room_id, room, msgs, model_key, connor_model_key, _q, context_limit, *, tts_enabled=False, tts_aion_voice="", tts_connor_voice="", whisper_mode=False):
@@ -2064,7 +2620,7 @@ async def _generate_group_replies(room_id, room, msgs, model_key, connor_model_k
                           tts_enabled=tts_enabled, tts_voice=tts_aion_voice, digest_result=digest, whisper_mode=whisper_mode)
 
 
-async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *, tts_enabled=False, tts_voice="", digest_result=None, whisper_mode=False):
+async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *, tts_enabled=False, tts_voice="", digest_result=None, whisper_mode=False, ambient_context: str = ""):
     ai_label = _name_for_identity("aion")
     aion_history, digest_out = await build_aion_group_context(
         room_id, msgs, context_limit, query_text,
@@ -2072,6 +2628,8 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
         whisper_mode=whisper_mode,
     )
     _process_voice_attachments(aion_history)
+    if ambient_context:
+        aion_history.append({"role": "user", "content": append_message_meta(ambient_context, time.time(), "环境语音")})
     aion_msg_id = f"cm_{int(time.time() * 1000)}_a"
     await _q.put({"type": "aion_start", "id": aion_msg_id})
 
@@ -2130,12 +2688,12 @@ async def _reply_aion(room_id, msgs, context_limit, query_text, model_key, _q, *
     ))
 
     # 触发后续动作（异步，不阻塞后续 AI 回复）
-    _fire_chatroom_followups(triggered, room_id, "aion", model_key)
+    _fire_chatroom_followups(triggered, room_id, "aion", model_key, aion_msg_id)
 
     return digest_out
 
 
-async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_model_key="Codex", tts_enabled=False, tts_voice="", digest_result=None, whisper_mode=False):
+async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_model_key="Codex", tts_enabled=False, tts_voice="", digest_result=None, whisper_mode=False, ambient_context: str = ""):
     connor_label = _name_for_identity("connor")
     connor_history, digest_out = await build_connor_group_context(
         room_id, msgs, context_limit, query_text,
@@ -2143,6 +2701,8 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
         whisper_mode=whisper_mode,
     )
     _process_voice_attachments(connor_history)
+    if ambient_context:
+        connor_history.append({"role": "user", "content": append_message_meta(ambient_context, time.time(), "环境语音")})
     connor_msg_id = f"cm_{int(time.time() * 1000)}_c"
     await _q.put({"type": "connor_start", "id": connor_msg_id})
 
@@ -2205,7 +2765,7 @@ async def _reply_connor(room_id, msgs, context_limit, query_text, _q, *, connor_
     ))
 
     # 触发后续动作
-    _fire_chatroom_followups(triggered, room_id, "connor", connor_model_key)
+    _fire_chatroom_followups(triggered, room_id, "connor", connor_model_key, connor_msg_id)
 
     return digest_out
 

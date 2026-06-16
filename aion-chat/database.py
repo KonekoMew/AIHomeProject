@@ -550,6 +550,55 @@ async def init_db():
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_idle_events_created ON idle_events(created_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_idle_events_actor ON idle_events(actor, created_at DESC)")
+        # 鈹€鈹€ 许愿池 鈹€鈹€
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wishes (
+                id TEXT PRIMARY KEY,
+                author TEXT NOT NULL,
+                author_name TEXT DEFAULT '',
+                content TEXT NOT NULL,
+                category TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
+                visibility TEXT DEFAULT 'shared',
+                origin TEXT DEFAULT 'manual',
+                source_type TEXT DEFAULT '',
+                source_ref TEXT DEFAULT '',
+                source_start_ts REAL,
+                source_end_ts REAL,
+                pulled_count INTEGER NOT NULL DEFAULT 0,
+                last_pulled_at REAL,
+                fulfilled_at REAL,
+                released_at REAL,
+                last_mentioned_at REAL,
+                metadata TEXT DEFAULT '{}',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        for col, defn in [
+            ("author_name", "TEXT DEFAULT ''"),
+            ("category", "TEXT DEFAULT ''"),
+            ("visibility", "TEXT DEFAULT 'shared'"),
+            ("origin", "TEXT DEFAULT 'manual'"),
+            ("source_type", "TEXT DEFAULT ''"),
+            ("source_ref", "TEXT DEFAULT ''"),
+            ("source_start_ts", "REAL"),
+            ("source_end_ts", "REAL"),
+            ("pulled_count", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_pulled_at", "REAL"),
+            ("fulfilled_at", "REAL"),
+            ("released_at", "REAL"),
+            ("last_mentioned_at", "REAL"),
+            ("metadata", "TEXT DEFAULT '{}'"),
+            ("updated_at", "REAL"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE wishes ADD COLUMN {col} {defn}")
+            except:
+                pass
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_wishes_status ON wishes(status, created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_wishes_author_status ON wishes(author, status, created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_wishes_pulled ON wishes(last_pulled_at)")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS chatroom_digest_anchors (
                 room_id TEXT PRIMARY KEY,
